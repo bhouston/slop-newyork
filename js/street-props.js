@@ -112,7 +112,7 @@ export function createSubwayEntranceParts() {
   }
   return [
     { name: 'subway-frame', geometry: merged(structure), material: new THREE.MeshStandardNodeMaterial({ vertexColors: true, roughness: 0.64, metalness: 0.35 }) },
-    { name: 'subway-details', geometry: merged(details), material: new THREE.MeshStandardNodeMaterial({ map: atlas, roughness: 0.8, alphaTest: 0.1, alphaToCoverage: true, side: THREE.DoubleSide }) },
+    { name: 'subway-details', geometry: merged(details), material: new THREE.MeshStandardNodeMaterial({ map: atlas, roughness: 0.8, alphaTest: 0.5, side: THREE.DoubleSide }) },
     { name: 'subway-globes', geometry: merged(globes), material: new THREE.MeshStandardNodeMaterial({ vertexColors: true, roughness: 0.4, emissive: 0xb7d9ba, emissiveIntensity: 0.18 }), castShadow: false }
   ];
 }

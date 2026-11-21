@@ -1451,14 +1451,13 @@ const TREE_WIND = vec2(0.86, 0.51);
  * Leaf atlas texels: r = leaf brightness, g = per-leaf hue jitter, b = twig / stalk mask, a = coverage (its mipmaps
  * keep the coverage, so distant crowns stay full).
  * Shading: per-tree tint with sun-yellowed & cooler leaves, deep leaves darker and occluded from the sky, sunlight
- * shining through the leaves toward the camera (FoliageLightingModel), alpha-to-coverage leaf edges on the MSAA scene
- * pass (alpha-tested in the shadow maps: dappled shadows). Wind: gusts rolling across the city sway the crowns
+ * shining through the leaves toward the camera (FoliageLightingModel), alpha-tested leaf edges (in the
+ * shadow maps too: dappled shadows). Wind: gusts rolling across the city sway the crowns
  * (shadows follow), branches bob and leaves flutter.
  */
 function createTreeMaterial(leafAtlas) {
   const mat = new TreeNodeMaterial({
     side: THREE.DoubleSide,
-    alphaToCoverage: true,
     metalness: 0.0,
     roughness: 0.8
   });
@@ -1678,7 +1677,7 @@ function createIronFenceMaterial() {
     metalness: 0.55,
     roughness: 0.5,
     side: THREE.DoubleSide,
-    alphaToCoverage: true
+    alphaTest: 0.5 // no MSAA for alpha-to-coverage, and the depth pre-pass needs a binary answer
   });
 
   mat.colorNode = Fn(() => {
@@ -1692,7 +1691,7 @@ function createIronFenceMaterial() {
     const post = filteredPulse(fract(postCoord), 0.483, 0.517, fw.x.div(2.6));
     const rails = filteredPulse(v, 0.872, 0.928, fw.y).add(filteredPulse(v, 0.098, 0.142, fw.y));
     const vertical = clamp(picket.add(post), 0.0, 1.0);
-    // Keep fractional coverage for the multisampled scene pass; alpha testing would erase distant pickets.
+    // Filtered coverage, cut out at one half by the alpha test (which erases pickets too distant to resolve)
     const alpha = float(1.0).sub(float(1.0).sub(vertical).mul(float(1.0).sub(rails)));
     return vec4(color(0x171a17), alpha);
   })();

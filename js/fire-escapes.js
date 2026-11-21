@@ -89,7 +89,7 @@ function flagRange(attribute, count) {
 
 export function createFireEscapeMaterial() {
   const steel = { color: 0x25292c, roughness: 0.65, metalness: 0.6 };
-  const material = new THREE.MeshStandardNodeMaterial({ ...steel, side: THREE.DoubleSide, alphaToCoverage: true });
+  const material = new THREE.MeshStandardNodeMaterial({ ...steel, side: THREE.DoubleSide });
   const part = attribute('escapePart', 'float');
   const size = attribute('escapeSize', 'vec2'); // Storey and nominal escape height.
   const invStorey = float(1).div(size.x);
@@ -214,7 +214,8 @@ export function createFireEscapeMaterial() {
 
     return alpha;
   })().toVar();
-  material.maskNode = material.opacityNode.greaterThan(0);
+  // Cut out at half coverage: there is no MSAA for alpha-to-coverage, and the depth pre-pass needs a binary answer
+  material.maskNode = material.opacityNode.greaterThan(0.5);
   material.maskShadowNode = material.opacityNode.greaterThan(0.5);
   return material;
 }
