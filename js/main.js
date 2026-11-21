@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import { pass, mrt, builtinIndirectContext, normalView, metalness, roughness, sample, packNormalToOctahedral, unpackOctahedralToNormal, vec2, vec3, vec4, velocity, rtt, screenUV, uniform, getViewPosition } from 'three/tsl';
+import { pass, mrt, builtinIndirectContext, normalView, metalness, roughness, sample, packNormalToOctahedral, unpackOctahedralToNormal, vec2, vec3, vec4, velocity, rtt, screenUV, uniform, getViewPosition, cubeTexture, positionWorld, smoothstep } from 'three/tsl';
 import { ssr } from 'three/addons/tsl/display/SSRNode.js';
 import { depthAwareDownsample } from 'three/addons/tsl/display/DepthAwareDownsampleNode.js';
 import { jointBilateralUpsample } from 'three/addons/tsl/display/JointBilateralUpsample.js';
@@ -318,12 +318,50 @@ async function initApp() {
   });
   const gi = upsample(giAccumulated.getTextureNode());
 
-  // The materials read both through their BRDF: SSR then the environment for indirect specular, SSGI then the
-  // environment for indirect diffuse, each source filling what the one before left uncovered. SSGI's coverage is
-  // its occlusion, so the AO is not applied a second time.
+  // Hero reflection probe: a cube map of the surroundings captured at the player's vehicle, without the vehicle. It
+  // answers what the screen can't (the street behind the camera, in the paintwork) for everything within a few
+  // vehicle radii, where it stands in for the sky-only environment, and its coverage fades out beyond.
+  const HERO_SIZE = 128;
+  const heroMips = Math.log2(HERO_SIZE);
+  const heroTarget = new THREE.CubeRenderTarget(HERO_SIZE, { type: THREE.HalfFloatType, generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter });
+  const heroCamera = new THREE.CubeCamera(0.3, 200000, heroTarget); // as far as the sky dome
+  const heroCenter = uniform(new THREE.Vector3());
+  const heroRadius = uniform(2.4); // the taxi's bounding radius, in metres
+  const heroIntensity = uniform(1); // 0 switches the probe off (it is then not updated either)
+  // Full coverage within 2 radii of the centre, none beyond 3
+  const heroCoverage = smoothstep(2, 3, positionWorld.sub(heroCenter).length().div(heroRadius)).oneMinus().mul(heroIntensity);
+  // ponytail: the cube's plain mip chain stands in for a GGX prefilter (PMREM), and its 2x2 level for the irradiance;
+  // prefilter it if rough or diffuse surfaces near the vehicle look wrong
+  const heroSpecular = ({ direction, roughness }) => vec4(cubeTexture(heroTarget.texture, direction).level(roughness.mul(heroMips)).rgb.mul(heroCoverage), heroCoverage);
+  const heroDiffuse = ({ normal }) => vec4(cubeTexture(heroTarget.texture, normal).level(heroMips - 1).rgb.mul(Math.PI).mul(heroCoverage), heroCoverage);
+  let heroFace = -1;
+  // One face per frame (a face is one more draw of the city), after the frame is rendered so its shadow maps are not
+  // drawn without the vehicle. All six on the first call.
+  function updateHeroProbe() {
+    const entity = controllerManager.getActiveEntity();
+    if (!entity || !entity.mesh || heroIntensity.value === 0) return;
+    heroCenter.value.copy(entity.position).y += 1;
+    heroCamera.position.copy(heroCenter.value);
+    heroCamera.updateMatrixWorld();
+    const visible = entity.mesh.visible;
+    entity.mesh.visible = false;
+    if (heroFace < 0) {
+      heroCamera.update(renderer, scene);
+    } else {
+      renderer.setRenderTarget(heroTarget, heroFace);
+      renderer.render(scene, heroCamera.children[heroFace]);
+      renderer.setRenderTarget(null);
+    }
+    heroFace = (heroFace + 1) % 6;
+    entity.mesh.visible = visible;
+  }
+
+  // The materials read all of it through their BRDF, each source filling what the one before left uncovered.
+  // Indirect specular: SSR, the hero probe, the environment. Indirect diffuse: SSGI (whose coverage is its occlusion,
+  // so the AO is not applied a second time), the hero probe, the environment.
   beautyPass.contextNode = builtinIndirectContext({
-    specular: [opaqueFragmentSource(ssrNode.getSpecularSource(reflection))],
-    diffuse: [opaqueFragmentSource(giPass.getDiffuseSource(gi.rgb, gi.a))]
+    specular: [opaqueFragmentSource(ssrNode.getSpecularSource(reflection)), heroSpecular],
+    diffuse: [opaqueFragmentSource(giPass.getDiffuseSource(gi.rgb, gi.a)), heroDiffuse]
   });
 
   const sceneColor = traa(beautyPass, prePassDepth, prePassVelocity, camera);
@@ -365,7 +403,9 @@ async function initApp() {
       'SSGI light (half res)': show(giNode.sample(screenUV).rgb),
       'SSGI light accumulated': show(gi.rgb),
       'SSGI AO': show(gi.a),
-      'SSGI coverage': show(gi.a.oneMinus())
+      'SSGI coverage': show(gi.a.oneMinus()),
+      // equirectangular: up is +y, the centre of the image looks along -z (north)
+      'Hero probe': show(cubeTexture(heroTarget.texture, vec3(screenUV.x.mul(Math.PI * 2).sin().mul(screenUV.y.mul(Math.PI).sin()), screenUV.y.mul(Math.PI).cos(), screenUV.x.mul(Math.PI * 2).cos().mul(screenUV.y.mul(Math.PI).sin()))).level(0).rgb)
     };
     const state = { output: 'Final' };
     inspector.createParameters('Output').add(state, 'output', Object.keys(outputs)).name('Show').onChange((name) => {
@@ -395,6 +435,9 @@ async function initApp() {
     giGui.add(giPass.useScreenSpaceSampling, 'value').name('Screen-space sampling');
     giGui.add(giPass, 'useTemporalFiltering').name('Per-frame noise');
     giGui.add(giAccumulated.maxFrames, 'value', 1, 64, 1).name('History frames');
+    const heroGui = inspector.createParameters('Hero probe');
+    heroGui.add(heroIntensity, 'value', 0, 1, 0.01).name('Coverage (0 = off)');
+    heroGui.add(heroRadius, 'value', 0.5, 20, 0.1).name('Vehicle radius (m)');
   }
 
   // 6. Wire UI Controls (Strictly using safe DOM APIs: textContent, classList, addEventListener)
@@ -912,6 +955,7 @@ async function initApp() {
       markInit('warmup');
     }
     renderPipeline.render();
+    updateHeroProbe();
     if (!warmedUp) {
       warmedUp = true;
       markInit('firstFrame');
