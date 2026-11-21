@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import { pass, mrt, builtinIndirectContext, normalView, metalness, roughness, sample, packNormalToOctahedral, unpackOctahedralToNormal, vec2, vec4, velocity, rtt, screenUV, textureSize } from 'three/tsl';
+import { pass, mrt, builtinIndirectContext, normalView, metalness, roughness, sample, packNormalToOctahedral, unpackOctahedralToNormal, vec2, vec3, vec4, velocity, rtt, screenUV, uniform, getViewPosition } from 'three/tsl';
 import { ssr } from 'three/addons/tsl/display/SSRNode.js';
 import { depthAwareDownsample } from 'three/addons/tsl/display/DepthAwareDownsampleNode.js';
 import { jointBilateralUpsample } from 'three/addons/tsl/display/JointBilateralUpsample.js';
@@ -303,14 +303,20 @@ async function initApp() {
 
   // Screen-space global illumination at the same half resolution, gathered from the previous frame like SSR. One
   // pass returns both the light of the directions the screen occludes and how much of the hemisphere stays open
-  // (its AO), so there is no separate AO pass. TRAA resolves its per-frame noise.
+  // (its AO), so there is no separate AO pass.
   const giPass = ssgi(previousBeauty, lowDepth, lowSceneNormal, camera);
   giPass.sliceCount.value = 2;
   giPass.stepCount.value = 8;
   const giNode = giPass.getGINode();
   const aoNode = giPass.getAONode();
-  // RGB is the bounced light, alpha the AO
-  const gi = upsample(sample((uv) => vec4(giNode.sample(uv).rgb, aoNode.sample(uv).r)), { size: vec2(textureSize(giNode)) });
+  // RGB is the bounced light, alpha the AO. A few samples per pixel are far too sparse on their own, so they are
+  // accumulated over time like SSR, at half resolution, before the upsample.
+  const giAccumulated = temporalReproject(rtt(vec4(giNode.sample(screenUV).rgb, aoNode.sample(screenUV).r), null, null, { resolutionScale: 0.5 }), lowDepth, lowNormal, downsample.getTextureNode('velocity'), camera, {
+    mode: 'diffuse',
+    accumulate: true,
+    normalDecode
+  });
+  const gi = upsample(giAccumulated.getTextureNode());
 
   // The materials read both through their BRDF: SSR then the environment for indirect specular, SSGI then the
   // environment for indirect diffuse, each source filling what the one before left uncovered. SSGI's coverage is
@@ -323,6 +329,72 @@ async function initApp() {
   const sceneColor = traa(beautyPass, prePassDepth, prePassVelocity, camera);
   const colorGrade = createPostProcessing(renderer, sceneColor);
   const renderPipeline = new THREE.RenderPipeline(renderer, colorGrade.outputNode);
+
+  // The gear button opens the three.js Inspector, created on first use: the pipeline's buffers as outputs and the
+  // SSR / SSGI settings
+  const inspectorButton = document.getElementById('btn-inspector');
+  let inspector = null;
+  if (inspectorButton) inspectorButton.addEventListener('click', async () => {
+    if (inspector === null) {
+      inspector = new (await import('three/addons/inspector/Inspector.js')).Inspector();
+      renderer.inspector = inspector;
+      inspector.domElement.style.zIndex = 1000; // above the HUD
+      addInspectorParameters();
+    } else {
+      inspector.domElement.style.display = inspector.domElement.style.display === 'none' ? '' : 'none';
+    }
+    inspectorButton.setAttribute('aria-pressed', String(inspector.domElement.style.display !== 'none'));
+  });
+  function addInspectorParameters() {
+    const show = (node) => vec4(vec3(node), 1);
+    const viewZ = getViewPosition(screenUV, prePassDepth.sample(screenUV).r, uniform(camera.projectionMatrixInverse)).z;
+    const outputs = {
+      'Final': colorGrade.outputNode,
+      'Beauty (before TRAA)': show(beautyPass.getTextureNode('output').rgb),
+      'Beauty (after TRAA)': show(sceneColor.rgb),
+      'Reprojected previous beauty': show(previousBeauty.sample(screenUV).rgb),
+      'Reprojection validity': show(previousBeauty.sample(screenUV).a),
+      'Depth (view distance / 200 m)': show(viewZ.negate().div(200)),
+      'Normal': show(normalDecode(prePassNormal.sample(screenUV)).mul(0.5).add(0.5)),
+      'Metalness': show(prePassMetalRough.sample(screenUV).r),
+      'Roughness': show(prePassMetalRough.sample(screenUV).g),
+      'Velocity (x100)': show(prePassVelocity.sample(screenUV).xy.abs().mul(100)),
+      'SSR traced (half res)': show(ssrNode.getTextureNode().sample(screenUV).rgb),
+      'SSR accumulated': show(reflection.rgb),
+      'SSR coverage': show(reflection.a),
+      'SSGI light (half res)': show(giNode.sample(screenUV).rgb),
+      'SSGI light accumulated': show(gi.rgb),
+      'SSGI AO': show(gi.a)
+    };
+    const state = { output: 'Final' };
+    inspector.createParameters('Output').add(state, 'output', Object.keys(outputs)).name('Show').onChange((name) => {
+      renderPipeline.outputNode = outputs[name];
+      renderPipeline.needsUpdate = true;
+    });
+    const ssrGui = inspector.createParameters('SSR');
+    ssrGui.add(ssrNode.maxDistance, 'value', 1, 500, 1).name('Max distance (m)');
+    ssrGui.add(ssrNode.thickness, 'value', 0, 2, 0.01).name('Thickness');
+    ssrGui.add(ssrNode.mirrorBias, 'value', 0, 1, 0.01).name('Mirror bias');
+    ssrGui.add(ssrNode.adaptiveMaxSteps, 'value', 16, 256, 16).name('Max steps');
+    ssrGui.add(ssrNode.coneMaxLevel, 'value', 0, 8, 1).name('Cone max mip');
+    ssrGui.add(ssrNode, 'rayReuse').name('Ray reuse');
+    ssrGui.add(ssrNode, 'coneTracing').name('Cone tracing');
+    ssrGui.add(ssrAccumulated.maxFrames, 'value', 1, 64, 1).name('History frames');
+    ssrGui.add(ssrAccumulated.clampIntensity, 'value', 0, 1, 0.01).name('History clamp');
+    const giGui = inspector.createParameters('SSGI');
+    giGui.add(giPass.giIntensity, 'value', 0, 30, 0.1).name('GI intensity');
+    giGui.add(giPass.aoIntensity, 'value', 0, 4, 0.01).name('AO intensity');
+    giGui.add(giPass.sliceCount, 'value', 1, 4, 1).name('Slices');
+    giGui.add(giPass.stepCount, 'value', 1, 32, 1).name('Steps');
+    giGui.add(giPass.radius, 'value', 1, 25, 0.1).name('Radius');
+    giGui.add(giPass.expFactor, 'value', 1, 3, 0.01).name('Exp factor');
+    giGui.add(giPass.thickness, 'value', 0.01, 10, 0.01).name('Thickness');
+    giGui.add(giPass.backfaceLighting, 'value', 0, 1, 0.01).name('Backface lighting');
+    giGui.add(giPass.useLinearThickness, 'value').name('Linear thickness');
+    giGui.add(giPass.useScreenSpaceSampling, 'value').name('Screen-space sampling');
+    giGui.add(giPass, 'useTemporalFiltering').name('Per-frame noise');
+    giGui.add(giAccumulated.maxFrames, 'value', 1, 64, 1).name('History frames');
+  }
 
   // 6. Wire UI Controls (Strictly using safe DOM APIs: textContent, classList, addEventListener)
   const modeButtons = document.querySelectorAll('[data-mode]');
