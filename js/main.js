@@ -8,6 +8,7 @@ import { reprojectedBeauty, previousViewZ } from 'three/addons/tsl/display/Repro
 import { opaqueFragment, opaqueFragmentSource } from 'three/addons/tsl/utils/OpaqueFragment.js';
 import { ao } from 'three/addons/tsl/display/GTAONode.js';
 import { denoise } from 'three/addons/tsl/display/DenoiseNode.js';
+import { traa } from 'three/addons/tsl/display/TRAANode.js';
 import { fsr1 } from 'three/addons/tsl/display/FSR1Node.js';
 import { createPostProcessing } from './post-processing.js';
 import { ClusteredLighting } from 'three/addons/lighting/ClusteredLighting.js';
@@ -86,11 +87,9 @@ async function initApp() {
   await showLoadingStage('Initializing graphics...', 'renderer');
 
   // 1. Initialize Three.js WebGPURenderer with 32-bit float reversedDepthBuffer.
-  // Firefox WebGL2 incurs a heavy renderbufferStorageMultisample + blitFramebuffer stall
-  // on multisampled floating-point MRT post-processing render targets, so disable MSAA on Firefox.
-  const isFirefox = typeof navigator !== 'undefined' && /Firefox\//.test(navigator.userAgent);
+  // No MSAA: TRAA anti-aliases the image, which lets the beauty pass test against the pre-pass's depth.
   const renderer = new THREE.WebGPURenderer({
-    antialias: !isFirefox,
+    antialias: false,
     powerPreference: 'high-performance',
     reversedDepthBuffer: true
   });
@@ -233,12 +232,12 @@ async function initApp() {
   //    upscaling, Bloom & Filmic Toning
   await showLoadingStage('Setting up visual effects, map and interface...', 'ui');
   const camera = cameraSystem.camera;
-  // The scene renders at 3/4 of the resolution (with MSAA) and FidelityFX Super Resolution 1 reconstructs the full
+  // The scene renders at 3/4 of the resolution and FidelityFX Super Resolution 1 reconstructs the full
   // resolution, which cuts the GPU frame time by about a third.
   const RENDER_SCALE = 0.75;
 
-  // The pre-pass draws the opaque geometry SSR and AO trace, without shading or MSAA (packed normals can't be averaged)
-  const prePass = pass(scene, camera, { samples: 0 });
+  // The pre-pass draws the opaque geometry SSR and AO trace, without shading
+  const prePass = pass(scene, camera);
   const preMRT = mrt({
     output: opaqueFragment(packNormalToOctahedral(normalView)),
     metalrough: vec2(metalness, roughness),
@@ -260,9 +259,9 @@ async function initApp() {
   prePass.getTexture('metalrough').type = THREE.UnsignedByteType;
   const normalDecode = (value) => unpackOctahedralToNormal(value.rg);
 
-  // The beauty pass shades with MSAA; only the resolved colour is read, so the multisampled colour is never stored
-  const beautyPass = pass(scene, camera);
-  beautyPass.renderTarget.storeMultisampledColorBuffer = false;
+  // The beauty pass shades on top of the pre-pass's depth instead of clearing it, so the depth test rejects every
+  // hidden fragment before it is shaded (no overdraw). TRAA jitters the camera for both passes alike.
+  const beautyPass = pass(scene, camera, { depthTexture: prePass.renderTarget.depthTexture, autoClearDepth: false });
   beautyPass.setResolutionScale(RENDER_SCALE);
 
   // SSR reflects the previous frame's beauty, reprojected, so it is ready before this frame is shaded. The mip chain
@@ -323,7 +322,9 @@ async function initApp() {
     specular: [opaqueFragmentSource(ssrNode.getSpecularSource(reflection))]
   }));
 
-  const sceneColor = fsr1(beautyPass.getTextureNode('output')).getTextureNode();
+  // Temporal anti-aliasing at the scene's resolution, before FSR 1 reconstructs the full one
+  const antialiased = traa(beautyPass, prePassDepth, prePassVelocity, camera);
+  const sceneColor = fsr1(antialiased.getTextureNode()).getTextureNode();
   const colorGrade = createPostProcessing(renderer, sceneColor);
   const renderPipeline = new THREE.RenderPipeline(renderer, colorGrade.outputNode);
 
