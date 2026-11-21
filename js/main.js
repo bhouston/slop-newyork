@@ -9,7 +9,6 @@ import { opaqueFragment, opaqueFragmentSource } from 'three/addons/tsl/utils/Opa
 import { ao } from 'three/addons/tsl/display/GTAONode.js';
 import { denoise } from 'three/addons/tsl/display/DenoiseNode.js';
 import { traa } from 'three/addons/tsl/display/TRAANode.js';
-import { fsr1 } from 'three/addons/tsl/display/FSR1Node.js';
 import { createPostProcessing } from './post-processing.js';
 import { ClusteredLighting } from 'three/addons/lighting/ClusteredLighting.js';
 import { getLocationLabel, isTypingInField, ROADS, NYC_LANDMARKS, TELEPORT_LOCATIONS } from './city-config.js';
@@ -228,13 +227,10 @@ async function initApp() {
   scene.matrixWorldAutoUpdate = false;
   markInit('culling');
 
-  // 5. TSL RenderPipeline: geometry pre-pass, half-resolution stochastic SSR resolved in the material BRDF, FSR 1
-  //    upscaling, Bloom & Filmic Toning
+  // 5. TSL RenderPipeline: geometry pre-pass, half-resolution stochastic SSR and AO resolved in the material BRDF,
+  //    TRAA, Bloom & Filmic Toning
   await showLoadingStage('Setting up visual effects, map and interface...', 'ui');
   const camera = cameraSystem.camera;
-  // The scene renders at 3/4 of the resolution and FidelityFX Super Resolution 1 reconstructs the full
-  // resolution, which cuts the GPU frame time by about a third.
-  const RENDER_SCALE = 0.75;
 
   // The pre-pass draws the opaque geometry SSR and AO trace, without shading
   const prePass = pass(scene, camera);
@@ -246,7 +242,6 @@ async function initApp() {
   // The attachments hold data, so the blending of transparent materials does not apply
   preMRT.setBlendMode('output', new THREE.BlendMode(THREE.NoBlending));
   prePass.setMRT(preMRT);
-  prePass.setResolutionScale(RENDER_SCALE);
 
   const prePassNormal = prePass.getTextureNode('output');
   const prePassDepth = prePass.getTextureNode('depth');
@@ -262,12 +257,10 @@ async function initApp() {
   // The beauty pass shades on top of the pre-pass's depth instead of clearing it, so the depth test rejects every
   // hidden fragment before it is shaded (no overdraw). TRAA jitters the camera for both passes alike.
   const beautyPass = pass(scene, camera, { depthTexture: prePass.renderTarget.depthTexture, autoClearDepth: false });
-  beautyPass.setResolutionScale(RENDER_SCALE);
 
   // SSR reflects the previous frame's beauty, reprojected, so it is ready before this frame is shaded. The mip chain
   // serves the cone footprint of rough reflections.
   const previousBeauty = reprojectedBeauty(prePass, beautyPass);
-  previousBeauty.setResolutionScale(RENDER_SCALE);
   previousBeauty.renderTarget.texture.generateMipmaps = true;
   previousBeauty.renderTarget.texture.minFilter = THREE.LinearMipmapLinearFilter;
 
@@ -279,7 +272,7 @@ async function initApp() {
 
   const lowSceneNormal = sample((uv) => normalDecode(lowNormal.sample(uv)));
   // Joint bilateral upsample to the scene's resolution, once per pixel rather than per shaded fragment
-  const upsample = (node) => rtt(jointBilateralUpsample(node, lowDepth, prePassDepth, camera).sample(screenUV), null, null, { resolutionScale: RENDER_SCALE }).sample(screenUV);
+  const upsample = (node) => rtt(jointBilateralUpsample(node, lowDepth, prePassDepth, camera).sample(screenUV)).sample(screenUV);
 
   const ssrNode = ssr(previousBeauty, lowDepth, lowSceneNormal, {
     camera,
@@ -322,9 +315,7 @@ async function initApp() {
     specular: [opaqueFragmentSource(ssrNode.getSpecularSource(reflection))]
   }));
 
-  // Temporal anti-aliasing at the scene's resolution, before FSR 1 reconstructs the full one
-  const antialiased = traa(beautyPass, prePassDepth, prePassVelocity, camera);
-  const sceneColor = fsr1(antialiased.getTextureNode()).getTextureNode();
+  const sceneColor = traa(beautyPass, prePassDepth, prePassVelocity, camera);
   const colorGrade = createPostProcessing(renderer, sceneColor);
   const renderPipeline = new THREE.RenderPipeline(renderer, colorGrade.outputNode);
 
