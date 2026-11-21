@@ -1,6 +1,11 @@
 import * as THREE from 'three/webgpu';
-import { pass, mrt, output, normalView, positionView, metalness, roughness, vec2, smoothstep } from 'three/tsl';
+import { pass, mrt, builtinIndirectContext, normalView, metalness, roughness, sample, packNormalToOctahedral, unpackOctahedralToNormal, vec2, vec4, velocity, rtt, screenUV } from 'three/tsl';
 import { ssr } from 'three/addons/tsl/display/SSRNode.js';
+import { depthAwareDownsample } from 'three/addons/tsl/display/DepthAwareDownsampleNode.js';
+import { jointBilateralUpsample } from 'three/addons/tsl/display/JointBilateralUpsample.js';
+import { temporalReproject } from 'three/addons/tsl/display/TemporalReprojectNode.js';
+import { reprojectedBeauty, previousViewZ } from 'three/addons/tsl/display/ReprojectedBeautyNode.js';
+import { opaqueFragment, opaqueFragmentSource } from 'three/addons/tsl/utils/OpaqueFragment.js';
 import { ao } from 'three/addons/tsl/display/GTAONode.js';
 import { denoise } from 'three/addons/tsl/display/DenoiseNode.js';
 import { fsr1 } from 'three/addons/tsl/display/FSR1Node.js';
@@ -224,63 +229,99 @@ async function initApp() {
   scene.matrixWorldAutoUpdate = false;
   markInit('culling');
 
-  // 5. TSL RenderPipeline with FSR 1 upscaling, Screen Space Reflections (SSRNode), Bloom & Filmic Toning
-  //    Fade out distant and matte surfaces so SSR spends its rays on visible glossy reflections.
+  // 5. TSL RenderPipeline: geometry pre-pass, half-resolution stochastic SSR resolved in the material BRDF, FSR 1
+  //    upscaling, Bloom & Filmic Toning
   await showLoadingStage('Setting up visual effects, map and interface...', 'ui');
-  const scenePass = pass(scene, cameraSystem.camera);
-  // The multisampled colour attachments (output, normal, metalRough) only need resolving, never storing: discarding
-  // them spares the GPU writing 3 x 4 samples per pixel to memory every frame (transient, memoryless attachments where
-  // the browser supports them). The multisampled depth stays stored: SSR reads it.
-  scenePass.renderTarget.storeMultisampledColorBuffer = false;
-  const ssrFade = smoothstep(360.0, 180.0, positionView.z.negate());
-  const maxSSRRoughness = 0.75;
-  const sceneMRT = mrt({
-    output: output,
-    normal: normalView,
-    metalRough: vec2(roughness.lessThan(maxSSRRoughness).select(metalness.mul(ssrFade), 0), roughness)
-  });
-  sceneMRT.setBlendMode('normal', new THREE.BlendMode(THREE.MaterialBlending));
-  sceneMRT.setBlendMode('metalRough', new THREE.BlendMode(THREE.MaterialBlending));
-  scenePass.setMRT(sceneMRT);
+  const camera = cameraSystem.camera;
   // The scene renders at 3/4 of the resolution (with MSAA) and FidelityFX Super Resolution 1 reconstructs the full
   // resolution, which cuts the GPU frame time by about a third.
   const RENDER_SCALE = 0.75;
-  scenePass.setResolutionScale(RENDER_SCALE);
 
-  const scenePassColor = scenePass.getTextureNode('output');
-  const scenePassDepth = scenePass.getTextureNode('depth');
-  const scenePassNormal = scenePass.getTextureNode('normal');
-  const scenePassMetalRough = scenePass.getTextureNode('metalRough');
-
-  const ssrPass = ssr(scenePassColor, scenePassDepth, scenePassNormal, {
-    metalnessNode: scenePassMetalRough.r,
-    roughnessNode: scenePassMetalRough.g,
-    camera: cameraSystem.camera
+  // The pre-pass draws the opaque geometry SSR and AO trace, without shading or MSAA (packed normals can't be averaged)
+  const prePass = pass(scene, camera, { samples: 0 });
+  const preMRT = mrt({
+    output: opaqueFragment(packNormalToOctahedral(normalView)),
+    metalrough: vec2(metalness, roughness),
+    velocity: vec4(velocity, 0, previousViewZ)
   });
-  // Reflections at the scene's own resolution, which keeps them sharp (about 3 ms more than half of it on an M1)
-  ssrPass.resolutionScale = RENDER_SCALE;
-  ssrPass.blurQuality = 1;
-  ssrPass.maxDistance.value = 42;
-  ssrPass.thickness.value = 0.85;
-  // Fewer coarse steps, then refine detected hits to keep reflection edges precise.
-  ssrPass.quality.value = 0.25;
-  ssrPass.binaryRefine = true;
-  ssrPass.intensity.value = 0.50;
-  ssrPass.screenEdgeFadeBlack = true;
+  // The attachments hold data, so the blending of transparent materials does not apply
+  preMRT.setBlendMode('output', new THREE.BlendMode(THREE.NoBlending));
+  prePass.setMRT(preMRT);
+  prePass.setResolutionScale(RENDER_SCALE);
 
-  // Roughness mip blur must not spread reflections back onto matte or nonreflective surfaces.
-  const reflectionMask = scenePassMetalRough.r.greaterThan(0).select(smoothstep(maxSSRRoughness, 0.55, scenePassMetalRough.g), 0);
-  const reflections = ssrPass.mul(reflectionMask);
+  const prePassNormal = prePass.getTextureNode('output');
+  const prePassDepth = prePass.getTextureNode('depth');
+  const prePassMetalRough = prePass.getTextureNode('metalrough');
+  // The attachments clone the output texture, so the velocity is created before the output becomes RG
+  const prePassVelocity = prePass.getTextureNode('velocity');
+  const normalTexture = prePass.getTexture('output');
+  normalTexture.format = THREE.RGFormat;
+  normalTexture.minFilter = normalTexture.magFilter = THREE.NearestFilter; // octahedral normals can't be filtered
+  prePass.getTexture('metalrough').type = THREE.UnsignedByteType;
+  const normalDecode = (value) => unpackOctahedralToNormal(value.rg);
+  const sceneNormal = sample((uv) => normalDecode(prePassNormal.sample(uv)));
 
-  // Ground Truth Ambient Occlusion from the same depth and normals: contact shading under cars and people and along
-  // the foot of every wall. Without a depth pre-pass it can only darken the lit image, so it stays short-range.
-  const aoPass = ao(scenePassDepth, scenePassNormal, cameraSystem.camera);
+  // The beauty pass shades with MSAA; only the resolved colour is read, so the multisampled colour is never stored
+  const beautyPass = pass(scene, camera);
+  beautyPass.renderTarget.storeMultisampledColorBuffer = false;
+  beautyPass.setResolutionScale(RENDER_SCALE);
+
+  // SSR reflects the previous frame's beauty, reprojected, so it is ready before this frame is shaded. The mip chain
+  // serves the cone footprint of rough reflections.
+  const previousBeauty = reprojectedBeauty(prePass, beautyPass);
+  previousBeauty.setResolutionScale(RENDER_SCALE);
+  previousBeauty.renderTarget.texture.generateMipmaps = true;
+  previousBeauty.renderTarget.texture.minFilter = THREE.LinearMipmapLinearFilter;
+
+  // Reflections are traced and accumulated at half of the scene's resolution, from depth-aware downsampled inputs
+  const downsample = depthAwareDownsample(prePassDepth, { normal: prePassNormal, metalrough: prePassMetalRough, velocity: prePassVelocity });
+  const lowDepth = downsample.getTextureNode('depth');
+  const lowNormal = downsample.getTextureNode('normal');
+  const lowMetalRough = downsample.getTextureNode('metalrough');
+
+  const ssrNode = ssr(previousBeauty, lowDepth, sample((uv) => normalDecode(lowNormal.sample(uv))), {
+    camera,
+    stochastic: true,
+    metalnessNode: lowMetalRough.r,
+    roughnessNode: lowMetalRough.g,
+    // Hi-Z cone tracing requires WebGPU, the WebGL 2 fallback uses the linear tracer
+    tracing: renderer.backend.isWebGPUBackend === true ? 'adaptive' : 'linear',
+    coneTracing: true,
+    rayReuse: true
+  });
+  ssrNode.adaptiveMaxSteps.value = 64;
+  ssrNode.coneMaxLevel.value = 5;
+  ssrNode.mirrorBias.value = 0.7;
+  ssrNode.maxDistance.value = 150;
+  ssrNode.thickness.value = 0;
+
+  // Temporal accumulation: ray reuse filters over space, so there is no spatial denoiser
+  const ssrAccumulated = temporalReproject(ssrNode.getTextureNode(), lowDepth, lowNormal, downsample.getTextureNode('velocity'), camera, {
+    mode: 'specular',
+    hitDistance: ssrNode.getHitDistanceNode(),
+    accumulate: true,
+    normalDecode
+  });
+  ssrAccumulated.maxFrames.value = 16;
+  ssrAccumulated.clampIntensity.value = 0.25;
+
+  // Joint bilateral upsample to the scene's resolution, once per pixel rather than per shaded fragment
+  const reflection = rtt(jointBilateralUpsample(ssrAccumulated.getTextureNode(), lowDepth, prePassDepth, camera).sample(screenUV), null, null, { resolutionScale: RENDER_SCALE }).sample(screenUV);
+
+  // The materials reflect SSR through their BRDF, and the environment where SSR has no coverage
+  beautyPass.contextNode = builtinIndirectContext({
+    specular: [opaqueFragmentSource(ssrNode.getSpecularSource(reflection))]
+  });
+
+  // Ground Truth Ambient Occlusion from the pre-pass: contact shading under cars and people and along the foot of
+  // every wall. It darkens the lit image, so it stays short-range.
+  const aoPass = ao(prePassDepth, sceneNormal, camera);
   aoPass.resolutionScale = 0.5 * RENDER_SCALE; // half of the scene's resolution: no sharper at more, and the cost doubles
   aoPass.radius.value = 2.0;
   // Edge-aware filter for GTAO's per-pixel noise pattern (no TRAA to resolve it over time)
-  const occlusion = denoise(aoPass.getTextureNode(), { depth: scenePassDepth, normal: scenePassNormal, camera: cameraSystem.camera });
-  const sceneColor = fsr1(scenePassColor).getTextureNode();
-  const colorGrade = createPostProcessing(renderer, sceneColor, reflections, occlusion.r);
+  const occlusion = denoise(aoPass.getTextureNode(), { depth: prePassDepth, normal: sceneNormal, camera });
+  const sceneColor = fsr1(beautyPass.getTextureNode('output')).getTextureNode();
+  const colorGrade = createPostProcessing(renderer, sceneColor, occlusion.r);
   const renderPipeline = new THREE.RenderPipeline(renderer, colorGrade.outputNode);
 
   // 6. Wire UI Controls (Strictly using safe DOM APIs: textContent, classList, addEventListener)
@@ -679,8 +720,11 @@ async function initApp() {
     });
 
     await showLoadingStage(`Compiling scene shaders... 0 / ${jobs.length} batches`, 'compile', false);
-    renderer.setRenderTarget(scenePass.renderTarget);
-    renderer.setMRT(sceneMRT);
+    // Only the pre-pass is compiled here. The beauty shaders read SSR, and compileAsync() runs the updates of the
+    // nodes a shader depends on, so each of these jobs would render the pre-pass again (43 s in all). The warm-up
+    // frame compiles the beauty shaders instead, in about 2 s.
+    renderer.setRenderTarget(prePass.renderTarget);
+    renderer.setMRT(preMRT);
     const compile = async (object) => {
       // Each compile starts in a task of its own: compileAsync() keeps one precompilation state on the renderer,
       // which must not be mid-step for two of them in the same microtask checkpoint
