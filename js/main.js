@@ -723,17 +723,32 @@ async function initApp() {
     });
 
     await showLoadingStage(`Compiling scene shaders... 0 / ${jobs.length} batches`, 'compile', false);
-    // Only the pre-pass is compiled here. The beauty shaders read SSR and AO, and compileAsync() runs the updates of
-    // the nodes a shader depends on, so each of these jobs would render the pre-pass again (43 s in all). The warm-up
-    // frame compiles the beauty shaders instead, in about 2 s.
-    renderer.setRenderTarget(prePass.renderTarget);
-    renderer.setMRT(preMRT);
+    // Both passes draw every object, each with shaders of its own: the pre-pass writes its MRT, the beauty pass
+    // shades with the SSR and AO context
     const compile = async (object) => {
+      for (const target of [prePass, beautyPass]) await compileFor(target, object);
+    };
+    // compileAsync() runs the per-frame updates of the nodes a shader depends on: for the beauty shaders that is the
+    // pre-pass, i.e. drawing the whole city once per job (43 s in all). Nothing is displayed yet, so skip them.
+    // ponytail: patches a private NodeFrame method; drop once compileAsync() stops running render updates itself
+    // The empty frame above drew no material, so nothing asked for the pre-pass yet and its render target still has
+    // the default depth format: use the one the pass sets up for a reversed depth buffer, or its pipelines won't match
+    prePass.renderTarget.depthTexture.type = THREE.FloatType;
+    const nodeFrame = renderer._nodes.nodeFrame;
+    nodeFrame.updateBeforeNode = () => {};
+    const compileFor = async (target, object) => {
       // Each compile starts in a task of its own: compileAsync() keeps one precompilation state on the renderer,
       // which must not be mid-step for two of them in the same microtask checkpoint
       await nextTask();
+      const contextNode = renderer.contextNode;
+      renderer.setRenderTarget(target.renderTarget);
+      renderer.setMRT(target.getMRT());
+      if (target.contextNode !== null) renderer.contextNode = target._getContextNode(renderer);
       try {
-        await renderer.compileAsync(object, cameraSystem.camera, scene);
+        // compileAsync() captures the render target, MRT and context before its first await
+        const compiled = renderer.compileAsync(object, cameraSystem.camera, scene);
+        renderer.contextNode = contextNode;
+        await compiled;
       } catch (e) {
         console.warn('[compile]', e); // the warm-up frame compiles it instead
       }
@@ -750,6 +765,7 @@ async function initApp() {
       }
     };
     await Promise.all(Array.from({ length: COMPILE_POOL }, worker));
+    delete nodeFrame.updateBeforeNode;
     renderer.setMRT(null);
     renderer.setRenderTarget(null);
     for (const o of culled) o.frustumCulled = true;
