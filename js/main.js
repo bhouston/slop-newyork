@@ -364,7 +364,8 @@ async function initApp() {
       'SSR coverage': show(reflection.a),
       'SSGI light (half res)': show(giNode.sample(screenUV).rgb),
       'SSGI light accumulated': show(gi.rgb),
-      'SSGI AO': show(gi.a)
+      'SSGI AO': show(gi.a),
+      'SSGI coverage': show(gi.a.oneMinus())
     };
     const state = { output: 'Final' };
     inspector.createParameters('Output').add(state, 'output', Object.keys(outputs)).name('Show').onChange((name) => {
