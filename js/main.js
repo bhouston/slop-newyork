@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import { pass, mrt, builtinAOContext, builtinIndirectContext, normalView, metalness, roughness, sample, packNormalToOctahedral, unpackOctahedralToNormal, vec2, vec4, velocity, rtt, screenUV, textureSize } from 'three/tsl';
+import { pass, mrt, builtinIndirectContext, normalView, metalness, roughness, sample, packNormalToOctahedral, unpackOctahedralToNormal, vec2, vec4, velocity, rtt, screenUV, textureSize } from 'three/tsl';
 import { ssr } from 'three/addons/tsl/display/SSRNode.js';
 import { depthAwareDownsample } from 'three/addons/tsl/display/DepthAwareDownsampleNode.js';
 import { jointBilateralUpsample } from 'three/addons/tsl/display/JointBilateralUpsample.js';
@@ -312,13 +312,13 @@ async function initApp() {
   // RGB is the bounced light, alpha the AO
   const gi = upsample(sample((uv) => vec4(giNode.sample(uv).rgb, aoNode.sample(uv).r)), { size: vec2(textureSize(giNode)) });
 
-  // The materials read all of it through their BRDF. Indirect specular: SSR, then the environment where SSR has no
-  // coverage. Indirect diffuse: the AO occludes the environment (and its specular), and the bounced light is added
-  // as a source without coverage of its own, since the AO already is that coverage and would otherwise count twice.
-  beautyPass.contextNode = builtinAOContext(gi.a, builtinIndirectContext({
+  // The materials read both through their BRDF: SSR then the environment for indirect specular, SSGI then the
+  // environment for indirect diffuse, each source filling what the one before left uncovered. SSGI's coverage is
+  // its occlusion, so the AO is not applied a second time.
+  beautyPass.contextNode = builtinIndirectContext({
     specular: [opaqueFragmentSource(ssrNode.getSpecularSource(reflection))],
-    diffuse: [opaqueFragmentSource(vec4(gi.rgb, 0))]
-  }));
+    diffuse: [opaqueFragmentSource(giPass.getDiffuseSource(gi.rgb, gi.a))]
+  });
 
   const sceneColor = traa(beautyPass, prePassDepth, prePassVelocity, camera);
   const colorGrade = createPostProcessing(renderer, sceneColor);
