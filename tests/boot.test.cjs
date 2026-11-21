@@ -19,7 +19,7 @@ test('city module preloads start after the import map and before stylesheets', (
   assert.equal(entries.length, 1);
   assert.ok(importMap.index < entries[0].index);
   assert.ok(entries[0].index < stylesheetIndex, 'the module graph starts loading early too');
-  assert.match(html, /<link rel="preconnect" href="https:\/\/cdn\.jsdelivr\.net" crossorigin\s*\/>/);
+  assert.match(html, /<link rel="preconnect" href="https:\/\/rawcdn\.githack\.com" crossorigin\s*\/>/);
   const { imports } = JSON.parse(importMap[1]);
   assert.equal(imports.three, imports['three/webgpu'], 'Three.js aliases share one module instance');
 });
