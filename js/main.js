@@ -1,13 +1,12 @@
 import * as THREE from 'three/webgpu';
-import { pass, mrt, builtinAOContext, builtinIndirectContext, normalView, metalness, roughness, sample, packNormalToOctahedral, unpackOctahedralToNormal, vec2, vec4, velocity, rtt, screenUV } from 'three/tsl';
+import { pass, mrt, builtinAOContext, builtinIndirectContext, normalView, metalness, roughness, sample, packNormalToOctahedral, unpackOctahedralToNormal, vec2, vec4, velocity, rtt, screenUV, textureSize } from 'three/tsl';
 import { ssr } from 'three/addons/tsl/display/SSRNode.js';
 import { depthAwareDownsample } from 'three/addons/tsl/display/DepthAwareDownsampleNode.js';
 import { jointBilateralUpsample } from 'three/addons/tsl/display/JointBilateralUpsample.js';
 import { temporalReproject } from 'three/addons/tsl/display/TemporalReprojectNode.js';
 import { reprojectedBeauty, previousViewZ } from 'three/addons/tsl/display/ReprojectedBeautyNode.js';
 import { opaqueFragment, opaqueFragmentSource } from 'three/addons/tsl/utils/OpaqueFragment.js';
-import { ao } from 'three/addons/tsl/display/GTAONode.js';
-import { denoise } from 'three/addons/tsl/display/DenoiseNode.js';
+import { ssgi } from 'three/addons/tsl/display/SSGINode.js';
 import { traa } from 'three/addons/tsl/display/TRAANode.js';
 import { createPostProcessing } from './post-processing.js';
 import { ClusteredLighting } from 'three/addons/lighting/ClusteredLighting.js';
@@ -227,12 +226,12 @@ async function initApp() {
   scene.matrixWorldAutoUpdate = false;
   markInit('culling');
 
-  // 5. TSL RenderPipeline: geometry pre-pass, half-resolution stochastic SSR and AO resolved in the material BRDF,
+  // 5. TSL RenderPipeline: geometry pre-pass, half-resolution stochastic SSR and SSGI resolved in the material BRDF,
   //    TRAA, Bloom & Filmic Toning
   await showLoadingStage('Setting up visual effects, map and interface...', 'ui');
   const camera = cameraSystem.camera;
 
-  // The pre-pass draws the opaque geometry SSR and AO trace, without shading
+  // The pre-pass draws the opaque geometry SSR and SSGI trace, without shading
   const prePass = pass(scene, camera);
   const preMRT = mrt({
     output: opaqueFragment(packNormalToOctahedral(normalView)),
@@ -272,7 +271,7 @@ async function initApp() {
 
   const lowSceneNormal = sample((uv) => normalDecode(lowNormal.sample(uv)));
   // Joint bilateral upsample to the scene's resolution, once per pixel rather than per shaded fragment
-  const upsample = (node) => rtt(jointBilateralUpsample(node, lowDepth, prePassDepth, camera).sample(screenUV)).sample(screenUV);
+  const upsample = (node, options) => rtt(jointBilateralUpsample(node, lowDepth, prePassDepth, camera, options).sample(screenUV)).sample(screenUV);
 
   const ssrNode = ssr(previousBeauty, lowDepth, lowSceneNormal, {
     camera,
@@ -302,17 +301,23 @@ async function initApp() {
 
   const reflection = upsample(ssrAccumulated.getTextureNode());
 
-  // Ground Truth Ambient Occlusion at the same half resolution: contact shading under cars and people and along the
-  // foot of every wall
-  const aoPass = ao(lowDepth, lowSceneNormal, camera);
-  aoPass.radius.value = 2.0;
-  // Edge-aware filter for GTAO's per-pixel noise pattern (no TRAA to resolve it over time)
-  const occlusion = upsample(denoise(aoPass.getTextureNode(), { depth: lowDepth, normal: lowSceneNormal, camera }).getTextureNode());
+  // Screen-space global illumination at the same half resolution, gathered from the previous frame like SSR. One
+  // pass returns both the light of the directions the screen occludes and how much of the hemisphere stays open
+  // (its AO), so there is no separate AO pass. TRAA resolves its per-frame noise.
+  const giPass = ssgi(previousBeauty, lowDepth, lowSceneNormal, camera);
+  giPass.sliceCount.value = 2;
+  giPass.stepCount.value = 8;
+  const giNode = giPass.getGINode();
+  const aoNode = giPass.getAONode();
+  // RGB is the bounced light, alpha the AO
+  const gi = upsample(sample((uv) => vec4(giNode.sample(uv).rgb, aoNode.sample(uv).r)), { size: vec2(textureSize(giNode)) });
 
-  // The materials reflect SSR through their BRDF, and the environment where SSR has no coverage; AO occludes their
-  // indirect light only, instead of darkening the lit image
-  beautyPass.contextNode = builtinAOContext(occlusion.r, builtinIndirectContext({
-    specular: [opaqueFragmentSource(ssrNode.getSpecularSource(reflection))]
+  // The materials read all of it through their BRDF. Indirect specular: SSR, then the environment where SSR has no
+  // coverage. Indirect diffuse: the AO occludes the environment (and its specular), and the bounced light is added
+  // as a source without coverage of its own, since the AO already is that coverage and would otherwise count twice.
+  beautyPass.contextNode = builtinAOContext(gi.a, builtinIndirectContext({
+    specular: [opaqueFragmentSource(ssrNode.getSpecularSource(reflection))],
+    diffuse: [opaqueFragmentSource(vec4(gi.rgb, 0))]
   }));
 
   const sceneColor = traa(beautyPass, prePassDepth, prePassVelocity, camera);
@@ -716,7 +721,7 @@ async function initApp() {
 
     await showLoadingStage(`Compiling scene shaders... 0 / ${jobs.length} batches`, 'compile', false);
     // Both passes draw every object, each with shaders of its own: the pre-pass writes its MRT, the beauty pass
-    // shades with the SSR and AO context
+    // shades with the SSR and SSGI context
     const compile = async (object) => {
       for (const target of [prePass, beautyPass]) await compileFor(target, object);
     };
