@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import { pass, mrt, builtinIndirectContext, normalView, metalness, roughness, sample, packNormalToOctahedral, unpackOctahedralToNormal, vec2, vec4, velocity, rtt, screenUV } from 'three/tsl';
+import { pass, mrt, builtinAOContext, builtinIndirectContext, normalView, metalness, roughness, sample, packNormalToOctahedral, unpackOctahedralToNormal, vec2, vec4, velocity, rtt, screenUV } from 'three/tsl';
 import { ssr } from 'three/addons/tsl/display/SSRNode.js';
 import { depthAwareDownsample } from 'three/addons/tsl/display/DepthAwareDownsampleNode.js';
 import { jointBilateralUpsample } from 'three/addons/tsl/display/JointBilateralUpsample.js';
@@ -259,7 +259,6 @@ async function initApp() {
   normalTexture.minFilter = normalTexture.magFilter = THREE.NearestFilter; // octahedral normals can't be filtered
   prePass.getTexture('metalrough').type = THREE.UnsignedByteType;
   const normalDecode = (value) => unpackOctahedralToNormal(value.rg);
-  const sceneNormal = sample((uv) => normalDecode(prePassNormal.sample(uv)));
 
   // The beauty pass shades with MSAA; only the resolved colour is read, so the multisampled colour is never stored
   const beautyPass = pass(scene, camera);
@@ -279,7 +278,11 @@ async function initApp() {
   const lowNormal = downsample.getTextureNode('normal');
   const lowMetalRough = downsample.getTextureNode('metalrough');
 
-  const ssrNode = ssr(previousBeauty, lowDepth, sample((uv) => normalDecode(lowNormal.sample(uv))), {
+  const lowSceneNormal = sample((uv) => normalDecode(lowNormal.sample(uv)));
+  // Joint bilateral upsample to the scene's resolution, once per pixel rather than per shaded fragment
+  const upsample = (node) => rtt(jointBilateralUpsample(node, lowDepth, prePassDepth, camera).sample(screenUV), null, null, { resolutionScale: RENDER_SCALE }).sample(screenUV);
+
+  const ssrNode = ssr(previousBeauty, lowDepth, lowSceneNormal, {
     camera,
     stochastic: true,
     metalnessNode: lowMetalRough.r,
@@ -305,23 +308,23 @@ async function initApp() {
   ssrAccumulated.maxFrames.value = 16;
   ssrAccumulated.clampIntensity.value = 0.25;
 
-  // Joint bilateral upsample to the scene's resolution, once per pixel rather than per shaded fragment
-  const reflection = rtt(jointBilateralUpsample(ssrAccumulated.getTextureNode(), lowDepth, prePassDepth, camera).sample(screenUV), null, null, { resolutionScale: RENDER_SCALE }).sample(screenUV);
+  const reflection = upsample(ssrAccumulated.getTextureNode());
 
-  // The materials reflect SSR through their BRDF, and the environment where SSR has no coverage
-  beautyPass.contextNode = builtinIndirectContext({
-    specular: [opaqueFragmentSource(ssrNode.getSpecularSource(reflection))]
-  });
-
-  // Ground Truth Ambient Occlusion from the pre-pass: contact shading under cars and people and along the foot of
-  // every wall. It darkens the lit image, so it stays short-range.
-  const aoPass = ao(prePassDepth, sceneNormal, camera);
-  aoPass.resolutionScale = 0.5 * RENDER_SCALE; // half of the scene's resolution: no sharper at more, and the cost doubles
+  // Ground Truth Ambient Occlusion at the same half resolution: contact shading under cars and people and along the
+  // foot of every wall
+  const aoPass = ao(lowDepth, lowSceneNormal, camera);
   aoPass.radius.value = 2.0;
   // Edge-aware filter for GTAO's per-pixel noise pattern (no TRAA to resolve it over time)
-  const occlusion = denoise(aoPass.getTextureNode(), { depth: prePassDepth, normal: sceneNormal, camera });
+  const occlusion = upsample(denoise(aoPass.getTextureNode(), { depth: lowDepth, normal: lowSceneNormal, camera }).getTextureNode());
+
+  // The materials reflect SSR through their BRDF, and the environment where SSR has no coverage; AO occludes their
+  // indirect light only, instead of darkening the lit image
+  beautyPass.contextNode = builtinAOContext(occlusion.r, builtinIndirectContext({
+    specular: [opaqueFragmentSource(ssrNode.getSpecularSource(reflection))]
+  }));
+
   const sceneColor = fsr1(beautyPass.getTextureNode('output')).getTextureNode();
-  const colorGrade = createPostProcessing(renderer, sceneColor, occlusion.r);
+  const colorGrade = createPostProcessing(renderer, sceneColor);
   const renderPipeline = new THREE.RenderPipeline(renderer, colorGrade.outputNode);
 
   // 6. Wire UI Controls (Strictly using safe DOM APIs: textContent, classList, addEventListener)
@@ -720,8 +723,8 @@ async function initApp() {
     });
 
     await showLoadingStage(`Compiling scene shaders... 0 / ${jobs.length} batches`, 'compile', false);
-    // Only the pre-pass is compiled here. The beauty shaders read SSR, and compileAsync() runs the updates of the
-    // nodes a shader depends on, so each of these jobs would render the pre-pass again (43 s in all). The warm-up
+    // Only the pre-pass is compiled here. The beauty shaders read SSR and AO, and compileAsync() runs the updates of
+    // the nodes a shader depends on, so each of these jobs would render the pre-pass again (43 s in all). The warm-up
     // frame compiles the beauty shaders instead, in about 2 s.
     renderer.setRenderTarget(prePass.renderTarget);
     renderer.setMRT(preMRT);
