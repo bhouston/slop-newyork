@@ -440,6 +440,7 @@ async function initApp() {
     ssrGui.add(ssrNode.maxDistance, 'value', 1, 500, 1).name('Max distance (m)');
     ssrGui.add(ssrNode.thickness, 'value', 0, 2, 0.01).name('Thickness');
     ssrGui.add(ssrNode.mirrorBias, 'value', 0, 1, 0.01).name('Mirror bias');
+    ssrGui.add(ssrNode.cameraRayThreshold, 'value', 0, 1, 0.01).name('Camera ray threshold');
     ssrGui.add(ssrNode.adaptiveMaxSteps, 'value', 16, 256, 16).name('Max steps');
     ssrGui.add(ssrNode.coneMaxLevel, 'value', 0, 8, 1).name('Cone max mip');
     ssrGui.add(ssrNode, 'rayReuse').name('Ray reuse');
