@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import { pass, mrt, builtinIndirectContext, normalView, metalness, roughness, sample, packNormalToOctahedral, unpackOctahedralToNormal, vec2, vec3, vec4, velocity, rtt, screenUV, uniform, getViewPosition, cubeTexture, positionWorld, smoothstep } from 'three/tsl';
+import { Fn, output, pass, mrt, builtinIndirectContext, normalView, metalness, roughness, sample, packNormalToOctahedral, unpackOctahedralToNormal, vec2, vec3, vec4, velocity, rtt, screenUV, uniform, getViewPosition, cubeTexture, positionWorld, smoothstep } from 'three/tsl';
 import { ssr } from 'three/addons/tsl/display/SSRNode.js';
 import { depthAwareDownsample } from 'three/addons/tsl/display/DepthAwareDownsampleNode.js';
 import { jointBilateralUpsample } from 'three/addons/tsl/display/JointBilateralUpsample.js';
@@ -359,8 +359,23 @@ async function initApp() {
   // The materials read all of it through their BRDF, each source filling what the one before left uncovered.
   // Indirect specular: SSR, the hero probe, the environment. Indirect diffuse: SSGI (whose coverage is its occlusion,
   // so the AO is not applied a second time), the hero probe, the environment.
+  // For the inspector's two indirect light outputs, a last specular source that answers nothing notes the lighting
+  // variables of the shader being built: its radiance and irradiance are what those lists and the environment resolve to.
+  const lightingOf = new WeakMap(); // by the builder's node list: Fn() gets a proxy of the builder, not the builder
+  const noteLighting = (query, builder) => (lightingOf.set(builder.nodes, builder.context), null);
+  const resolvedLight = (get) => Fn((builder) => lightingOf.has(builder.nodes) ? vec4(get(lightingOf.get(builder.nodes)), 1)
+    : vec4(0, 0, 0, builder.material.transparent ? 0 : 1))(); // unlit: black, or what is behind it if transparent
+  const indirectMRT = mrt({
+    output,
+    indirectSpecular: resolvedLight((c) => c.radiance), // of the base lobe
+    // before the material's own AO. The hemisphere light is in it: it fills what the sources leave open, like the environment
+    indirectDiffuse: resolvedLight((c) => c.irradiance.add(c.occlusionAwareIrradiance))
+  });
+  // The alpha above decides what a fragment replaces, whatever the blending of its material
+  indirectMRT.setBlendMode('indirectSpecular', new THREE.BlendMode(THREE.NormalBlending));
+  indirectMRT.setBlendMode('indirectDiffuse', new THREE.BlendMode(THREE.NormalBlending));
   beautyPass.contextNode = builtinIndirectContext({
-    specular: [opaqueFragmentSource(ssrNode.getSpecularSource(reflection)), heroSpecular],
+    specular: [opaqueFragmentSource(ssrNode.getSpecularSource(reflection)), heroSpecular, noteLighting],
     diffuse: [opaqueFragmentSource(giPass.getDiffuseSource(gi.rgb, gi.a)), heroDiffuse]
   });
 
@@ -404,11 +419,20 @@ async function initApp() {
       'SSGI light accumulated': show(gi.rgb),
       'SSGI AO': show(gi.a),
       'SSGI coverage': show(gi.a.oneMinus()),
+      'Indirect Specular': null, // these two are set when first shown, see below
+      'Indirect Diffuse': null,
       // equirectangular: up is +y, the centre of the image looks along -z (north)
       'Hero probe': show(cubeTexture(heroTarget.texture, vec3(screenUV.x.mul(Math.PI * 2).sin().mul(screenUV.y.mul(Math.PI).sin()), screenUV.y.mul(Math.PI).cos(), screenUV.x.mul(Math.PI * 2).cos().mul(screenUV.y.mul(Math.PI).sin()))).level(0).rgb)
     };
     const state = { output: 'Final' };
     inspector.createParameters('Output').add(state, 'output', Object.keys(outputs)).name('Show').onChange((name) => {
+      if (outputs[name] === null) {
+        // The beauty pass writes the two to attachments of their own, which recompiles its shaders (a pause).
+        // ponytail: the attachments stay until the page is reloaded; drop them on leaving if their cost gets in the way
+        beautyPass.setMRT(indirectMRT);
+        outputs['Indirect Specular'] = show(beautyPass.getTextureNode('indirectSpecular').rgb);
+        outputs['Indirect Diffuse'] = show(beautyPass.getTextureNode('indirectDiffuse').rgb.div(Math.PI)); // as a white surface reflects it
+      }
       renderPipeline.outputNode = outputs[name];
       renderPipeline.needsUpdate = true;
     });
