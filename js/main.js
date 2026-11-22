@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import { Fn, output, pass, mrt, builtinIndirectContext, normalView, metalness, roughness, sample, packNormalToOctahedral, unpackOctahedralToNormal, vec2, vec3, vec4, velocity, rtt, screenUV, uniform, getViewPosition, cubeTexture, positionWorld, smoothstep } from 'three/tsl';
+import { Fn, output, pass, mrt, builtinIndirectContext, normalView, metalness, roughness, sample, packNormalToOctahedral, unpackOctahedralToNormal, vec2, vec3, vec4, velocity, rtt, screenUV, uniform, getViewPosition, cubeTexture } from 'three/tsl';
 import { ssr } from 'three/addons/tsl/display/SSRNode.js';
 import { depthAwareDownsample } from 'three/addons/tsl/display/DepthAwareDownsampleNode.js';
 import { jointBilateralUpsample } from 'three/addons/tsl/display/JointBilateralUpsample.js';
@@ -319,17 +319,19 @@ async function initApp() {
   const gi = upsample(giAccumulated.getTextureNode());
 
   // Hero reflection probe: a cube map of the surroundings captured at the player's vehicle, without the vehicle. It
-  // answers what the screen can't (the street behind the camera, in the paintwork) for everything within a few
-  // vehicle radii, where it stands in for the sky-only environment, and its coverage fades out beyond.
+  // answers what the screen can't (the street behind the camera, in the paintwork) for the vehicle alone, where it
+  // stands in for the sky-only environment. The road and the cars next to it are not at the probe's centre.
   const HERO_SIZE = 128;
   const heroMips = Math.log2(HERO_SIZE);
   const heroTarget = new THREE.CubeRenderTarget(HERO_SIZE, { type: THREE.HalfFloatType, generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter });
   const heroCamera = new THREE.CubeCamera(0.3, 200000, heroTarget); // as far as the sky dome
-  const heroCenter = uniform(new THREE.Vector3());
-  const heroRadius = uniform(2.4); // the taxi's bounding radius, in metres
   const heroIntensity = uniform(1); // 0 switches the probe off (it is then not updated either)
-  // Full coverage within 2 radii of the centre, none beyond 3
-  const heroCoverage = smoothstep(2, 3, positionWorld.sub(heroCenter).length().div(heroRadius)).oneMinus().mul(heroIntensity);
+  let heroMesh = null; // the player's vehicle (or person), whose meshes the probe lights
+  const isHero = uniform(0).onObjectUpdate(({ object }) => {
+    for (let o = object; o !== null; o = o.parent) if (o === heroMesh) return 1;
+    return 0;
+  });
+  const heroCoverage = isHero.mul(heroIntensity);
   // ponytail: the cube's plain mip chain stands in for a GGX prefilter (PMREM), and its 2x2 level for the irradiance;
   // prefilter it if rough or diffuse surfaces near the vehicle look wrong
   const heroSpecular = ({ direction, roughness }) => vec4(cubeTexture(heroTarget.texture, direction).level(roughness.mul(heroMips)).rgb.mul(heroCoverage), heroCoverage);
@@ -339,9 +341,9 @@ async function initApp() {
   // drawn without the vehicle. All six on the first call.
   function updateHeroProbe() {
     const entity = controllerManager.getActiveEntity();
-    if (!entity || !entity.mesh || heroIntensity.value === 0) return;
-    heroCenter.value.copy(entity.position).y += 1;
-    heroCamera.position.copy(heroCenter.value);
+    heroMesh = entity?.mesh ?? null;
+    if (heroMesh === null || heroIntensity.value === 0) return;
+    heroCamera.position.copy(entity.position).y += 1;
     heroCamera.updateMatrixWorld();
     const visible = entity.mesh.visible;
     entity.mesh.visible = false;
@@ -462,7 +464,6 @@ async function initApp() {
     giGui.add(giAccumulated.maxFrames, 'value', 1, 64, 1).name('History frames');
     const heroGui = inspector.createParameters('Hero probe');
     heroGui.add(heroIntensity, 'value', 0, 1, 0.01).name('Coverage (0 = off)');
-    heroGui.add(heroRadius, 'value', 0.5, 20, 0.1).name('Vehicle radius (m)');
   }
 
   // 6. Wire UI Controls (Strictly using safe DOM APIs: textContent, classList, addEventListener)
