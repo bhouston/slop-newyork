@@ -8,6 +8,7 @@ import { reprojectedBeauty, previousViewZ } from 'three/addons/tsl/display/Repro
 import { opaqueFragment, opaqueFragmentSource } from 'three/addons/tsl/utils/OpaqueFragment.js';
 import { outermostNormalView, outermostRoughness, outermostMetalness } from 'three/addons/tsl/utils/OutermostLobe.js';
 import { ssgi } from 'three/addons/tsl/display/SSGINode.js';
+import { denoise } from 'three/addons/tsl/display/DenoiseNode.js';
 import { traa } from 'three/addons/tsl/display/TRAANode.js';
 import { fsr1 } from 'three/addons/tsl/display/FSR1Node.js';
 import { createPostProcessing } from './post-processing.js';
@@ -335,9 +336,11 @@ async function initApp() {
   const giNode = giPass.getGINode();
   const aoNode = giPass.getAONode();
   // RGB is the bounced light, alpha the AO. A few samples per pixel are far too sparse on their own, so they are
-  // accumulated over time like SSR, at half resolution, before the upsample.
+  // filtered over space by an edge-aware blur (SVGF's à-trous wavelets, guided by the depth and the normals, two
+  // passes for a span of 9 texels) and then accumulated over time like SSR, at half resolution, before the upsample.
   const giInput = rtt(vec4(giNode.sample(screenUV).rgb, aoNode.sample(screenUV).r), null, null, { resolutionScale: 0.5 });
-  const giAccumulated = temporalReproject(giInput, lowDepth, lowNormal, downsample.getTextureNode('velocity'), camera, {
+  const giDenoised = denoise(giInput, { depth: lowDepth, normal: lowSceneNormal, camera, alpha: true });
+  const giAccumulated = temporalReproject(giDenoised.getTextureNode(), lowDepth, lowNormal, downsample.getTextureNode('velocity'), camera, {
     mode: 'diffuse',
     accumulate: true,
     normalDecode
@@ -444,24 +447,23 @@ async function initApp() {
   setRenderingResolution();
   const renderPipeline = new THREE.RenderPipeline(renderer, colorGrade.outputNode);
 
-  // The gear button opens the three.js Inspector, created on first use: the pipeline's buffers as outputs and the
-  // SSR / SSGI settings
-  const inspectorButton = document.getElementById('btn-inspector');
+  // The gear and gauge buttons open the three.js Inspector, created on first use, on its Parameters tab (the
+  // pipeline's buffers as outputs and the SSR / SSGI settings) and on its Performance tab (the frame rate and the
+  // CPU / GPU time of each pass). Clicking the button of the open tab hides the Inspector.
   let inspector = null;
-  if (inspectorButton) inspectorButton.addEventListener('click', async () => {
+  const inspectorButtons = { parameters: document.getElementById('btn-inspector'), performance: document.getElementById('btn-performance') };
+  for (const [tab, button] of Object.entries(inspectorButtons)) if (button) button.addEventListener('click', async () => {
     if (inspector === null) {
       inspector = new (await import('three/addons/inspector/Inspector.js')).Inspector();
       renderer.inspector = inspector;
       inspector.domElement.style.zIndex = 1000; // above the HUD
       addInspectorParameters();
-    } else {
-      inspector.domElement.style.display = inspector.domElement.style.display === 'none' ? '' : 'none';
     }
-    if (inspector.domElement.style.display !== 'none') {
-      // The gear opens the app's rendering controls, regardless of the saved Inspector tab.
-      inspector.profiler.setActiveTab(inspector.parameters.id);
-    }
-    inspectorButton.setAttribute('aria-pressed', String(inspector.domElement.style.display !== 'none'));
+    const style = inspector.domElement.style;
+    const shown = style.display !== 'none' && button.getAttribute('aria-pressed') === 'true';
+    style.display = shown ? 'none' : '';
+    if (!shown) inspector.profiler.setActiveTab(inspector[tab].id); // regardless of the saved Inspector tab
+    for (const [name, other] of Object.entries(inspectorButtons)) if (other) other.setAttribute('aria-pressed', String(!shown && name === tab));
   });
   const show = (node) => vec4(vec3(node), 1);
   // The inspector's two indirect light outputs, set up when first asked for: the beauty pass writes them to
@@ -495,6 +497,7 @@ async function initApp() {
       'SSR accumulated': show(reflection.rgb),
       'SSR coverage': show(reflection.a),
       'SSGI light (half res)': show(giNode.sample(screenUV).rgb),
+      'SSGI light blurred (half res)': show(giDenoised.getTextureNode().sample(screenUV).rgb),
       'SSGI light accumulated': show(gi.rgb),
       'SSGI AO': show(gi.a),
       'SSGI coverage': show(gi.a.oneMinus()),
@@ -552,6 +555,7 @@ async function initApp() {
     giGui.add(giPass.useLinearThickness, 'value').name('Linear thickness');
     giGui.add(giPass.useScreenSpaceSampling, 'value').name('Screen-space sampling');
     giGui.add(giPass, 'useTemporalFiltering').name('Per-frame noise');
+    giGui.add(giDenoised.luminancePhi, 'value', 0, 10, 0.1).name('Blur strength');
     giGui.add(giAccumulated.maxFrames, 'value', 1, 64, 1).name('History frames');
     const heroGui = inspector.createParameters('Hero probe');
     heroGui.add(heroIntensity, 'value', 0, 1, 0.01).name('Coverage (0 = off)');
