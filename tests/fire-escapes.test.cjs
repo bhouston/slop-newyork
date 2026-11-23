@@ -83,7 +83,8 @@ class QuadNode {
 const wrap = (v) => (v instanceof QuadNode ? v : new QuadNode(toQuad(v)));
 
 const tslStub = {
-  Fn: (builder) => (...args) => new QuadNode(() => toQuad(builder(args.map(wrap)))),
+  // (a Fn without inputs is handed the node builder: here one of a pass that writes no motion vectors)
+  Fn: (builder) => (...args) => new QuadNode(() => toQuad(builder(Object.assign(args.map(wrap), { needsPreviousData: () => false })))),
   If: (cond, body) => {
     let matched = toQuad(cond)[0][0] > 0;
     if (matched) {

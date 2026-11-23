@@ -2,7 +2,7 @@ import * as THREE from 'three/webgpu';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import {
   Fn, If, float, vec3, vec4, attribute, varying, vertexStage,
-  positionGeometry, positionLocal, normalGeometry,
+  positionGeometry, positionLocal, positionPrevious, normalGeometry,
   abs, floor, fract, mod, round, step, fwidth, max, min, mix, clamp
 } from 'three/tsl';
 import { filteredPulse } from './tsl-materials.js';
@@ -98,14 +98,18 @@ export function createFireEscapeMaterial() {
   const fullHeight = size.y.sub(1).add(scale.mul(3.2));
 
   // (after the instance transform, which only turns the escape about y and moves it: lift the vertices in place)
-  material.positionNode = Fn(() => {
+  material.positionNode = Fn((builder) => {
     const p = positionGeometry;
     const flat = step(4.5, part);
     // Decks on every landing, stair runs below all but the top one; unused upper storeys collapse to a point
     const landings = round(size.y.sub(1).mul(invStorey)).add(1);
     const shown = step(attribute('escapeLevel', 'float').add(step(5.5, part)).add(0.5), landings);
     const y = mix(p.y.mul(fullHeight), p.y.add(2.2).mul(scale), flat);
-    return positionLocal.add(vec3(0, y.sub(p.y), 0)).mul(mix(1, shown, flat));
+    const lifted = (position) => position.add(vec3(0, y.sub(p.y), 0)).mul(mix(1, shown, flat));
+    // Motion vectors (only in the pass that writes them): an escape stands still, so its vertices were lifted the same
+    // a frame ago. Without it the velocity is measured from the vertex before its lift
+    if (builder.needsPreviousData()) positionPrevious.assign(lifted(positionPrevious));
+    return lifted(positionLocal);
   })();
 
   // Precompute linear coordinates & per-instance ratios in the vertex stage so each fragment only evaluates its own part
