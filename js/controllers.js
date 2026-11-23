@@ -528,7 +528,6 @@ class ThirdPersonControllerManager {
     const doorDecalMat = new THREE.MeshStandardNodeMaterial({
       map: doorDecalTex,
       roughness: 0.24,
-      metalness: 0.34,
       polygonOffset: true,
       polygonOffsetFactor: -2,
       polygonOffsetUnits: -2

@@ -1380,25 +1380,18 @@ function createChryslerCrownMaterial() {
   return mat;
 }
 
-// Vehicle paint with Fresnel reflections and a sharp sun highlight.
+// Bicycle frame paint.
 function createCarPaintMaterial(baseHex = 0xffc218) {
   if (_carPaintCache.has(baseHex)) return _carPaintCache.get(baseHex);
-  const mat = new THREE.MeshStandardNodeMaterial({
-    metalness: 0.56,
-    roughness: 0.11
+  // A slightly rough coloured base, not a metal, under a glossy clearcoat: the coat's real reflections replace the
+  // sky and sun glints that used to be painted into the colour
+  const mat = new THREE.MeshPhysicalNodeMaterial({
+    color: baseHex,
+    metalness: 0,
+    roughness: 0.5,
+    clearcoat: 1,
+    clearcoatRoughness: 0.04
   });
-
-  const cBase = color(baseHex);
-
-  mat.colorNode = Fn(() => {
-    const viewDir = normalize(cameraPosition.sub(positionWorld));
-    const sunDir = normalize(cityUniforms.uSkySunDir);
-    const reflectDir = reflect(viewDir.negate(), normalWorld);
-    const fresnel = pow(clamp(float(1.0).sub(abs(dot(viewDir, normalWorld))), 0.0, 1.0), 2.2);
-    const envCol = mix(cityUniforms.uSkyHorizonColor, color(0xffffff), clamp(reflectDir.y.mul(0.55).add(0.5), 0.0, 1.0));
-    const clearcoatSpec = pow(max(dot(reflectDir, sunDir), 0.0), 36.0).mul(0.55);
-    return mix(cBase, envCol, fresnel.mul(0.48)).add(cityUniforms.uSunColor.mul(clearcoatSpec));
-  })();
 
   _carPaintCache.set(baseHex, mat);
   return mat;

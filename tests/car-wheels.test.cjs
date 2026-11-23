@@ -167,7 +167,7 @@ class Vector4 {
 
 const cars = loadModule(readFileSync(join(__dirname, '../js/cars.js'), 'utf8'), {
   imports: {
-    'three/webgpu': { MeshStandardNodeMaterial, Vector4, CanvasTexture: class {}, SRGBColorSpace: 'srgb' },
+    'three/webgpu': { MeshStandardNodeMaterial, MeshPhysicalNodeMaterial: MeshStandardNodeMaterial, Vector4, CanvasTexture: class {}, SRGBColorSpace: 'srgb' },
     'three/tsl': tslStub,
     'three/addons/utils/BufferGeometryUtils.js': { mergeGeometries: () => ({}) },
     'three/addons/geometries/LoftGeometry.js': { LoftGeometry: class {} },

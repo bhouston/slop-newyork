@@ -2543,18 +2543,19 @@ function createLoftedCarMaterial(spec, fixedColorHex = null) {
     return outCol;
   });
 
-  // ---- Roughness & metalness (glossy clearcoat with tight sun highlight & strong SSR/IBL reflection) ---------------
-  const paintRough = mix(float(0.11), float(0.16), isMetallic);
-  const paintMetal = mix(float(0.32), float(0.42), isMetallic).add(fresnel.mul(0.14));
+  // ---- Roughness, metalness & clearcoat: the paint is a slightly rough coloured base, never a metal (no tinted
+  // reflections, the metallic finishes included), under a glossy clearcoat, which is what shines and reflects the street
+  const paintRough = mix(float(0.5), float(0.4), isMetallic);
+  const paintMetal = float(0.0);
+  const coatRough = float(0.04);
 
   const roughFn = Fn(() => {
     const r = float(0.78).toVar();
     If(isBody.greaterThan(0.5), () => {
-      const lowMatte = smoothstep(sillY + 0.10, sillY - 0.01, p.y).mul(0.16);
-      r.assign(paintRough.add(lowMatte).add(dirtMask().mul(dirtAmount).mul(0.5)));
+      r.assign(paintRough);
     }).ElseIf(isWindow.greaterThan(0.5), () => {
       const { glass, seal } = evalWindowGlass();
-      r.assign(mix(mix(paintRough, float(0.78), seal), float(0.08), glass));
+      r.assign(mix(mix(paintRough, float(0.78), seal), float(0.02), glass)); // glass is polished
     }).ElseIf(isAlloyFace.greaterThan(0.5), () => {
       r.assign(mix(float(0.22), float(0.52), isPolice));
     }).ElseIf(isMirror.greaterThan(0.5), () => {
@@ -2578,6 +2579,30 @@ function createLoftedCarMaterial(spec, fixedColorHex = null) {
       m.assign(mix(paintMetal, float(0.65), smoothstep(0.45, 0.65, n.z.negate())));
     });
     return m;
+  });
+
+  // The clearcoat covers the paint only: not the glass, its seals, the mirror glass or the trim
+  const clearcoatFn = Fn(() => {
+    const c = float(0.0).toVar();
+    If(isBody.greaterThan(0.5), () => {
+      c.assign(1.0);
+    }).ElseIf(isWindow.greaterThan(0.5), () => {
+      const { glass, seal } = evalWindowGlass();
+      c.assign(one.sub(seal).mul(one.sub(glass)));
+    }).ElseIf(isMirror.greaterThan(0.5), () => {
+      c.assign(one.sub(smoothstep(0.45, 0.65, n.z.negate())));
+    });
+    return c;
+  });
+
+  // Road film on the sills and dirt dull the coat
+  const coatRoughFn = Fn(() => {
+    const r = coatRough.toVar();
+    If(isBody.greaterThan(0.5), () => {
+      const lowMatte = smoothstep(sillY + 0.10, sillY - 0.01, p.y).mul(0.16);
+      r.assign(coatRough.add(lowMatte).add(dirtMask().mul(dirtAmount).mul(0.5)));
+    });
+    return r;
   });
 
   // ---- Emissive (evaluated only on front/rear lamp zones, taxi sign, or braking rear window) -----------------------
@@ -2627,12 +2652,14 @@ function createLoftedCarMaterial(spec, fixedColorHex = null) {
     return emit;
   });
 
-  const mat = new THREE.MeshStandardNodeMaterial();
+  const mat = new THREE.MeshPhysicalNodeMaterial();
   mat.envMapIntensity = 1.35;
   if (fixed) mat.userData.carState = stateUniform;
   mat.colorNode = colorFn();
   mat.roughnessNode = roughFn();
   mat.metalnessNode = metalFn();
+  mat.clearcoatNode = clearcoatFn();
+  mat.clearcoatRoughnessNode = coatRoughFn();
   mat.emissiveNode = emissiveFn();
 
   _carMaterialCache.set(cacheKey, mat);

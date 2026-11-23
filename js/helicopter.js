@@ -308,7 +308,7 @@ let _heliLoftedMat = null;
 function createLoftedHelicopterMaterial() {
   if (_heliLoftedMat) return _heliLoftedMat;
 
-  const mat = new THREE.MeshStandardNodeMaterial();
+  const mat = new THREE.MeshPhysicalNodeMaterial();
 
   const partId = attribute('partId', 'float');
   const isCowling = step(abs(partId.sub(HELI_PARTS.COWLING)), 0.25);
@@ -439,8 +439,11 @@ function createLoftedHelicopterMaterial() {
 
   mat.colorNode = evaluateHeliSurface();
 
-  mat.roughnessNode = mix(mix(float(0.20), float(0.05), rawWindowMask), float(0.55), max(isSkid, isRotor));
-  mat.metalnessNode = mix(mix(float(0.35), float(0.88), rawWindowMask), float(0.82), isExhaust);
+  // The paint is a slightly rough dielectric under a glossy clearcoat; the skids, rotors and exhausts are bare
+  mat.roughnessNode = mix(mix(float(0.5), float(0.02), rawWindowMask), float(0.55), max(isSkid, isRotor));
+  mat.metalnessNode = mix(mix(float(0.0), float(0.88), rawWindowMask), float(0.82), isExhaust);
+  mat.clearcoatNode = float(1.0).sub(max(rawWindowMask, max(isSkid, max(isRotor, isExhaust))));
+  mat.clearcoatRoughnessNode = float(0.05);
 
   _heliLoftedMat = mat;
   return mat;

@@ -1,11 +1,12 @@
 import * as THREE from 'three/webgpu';
-import { Fn, output, pass, mrt, builtinIndirectContext, normalView, metalness, roughness, sample, packNormalToOctahedral, unpackOctahedralToNormal, vec2, vec3, vec4, velocity, rtt, screenUV, uniform, getViewPosition, cubeTexture } from 'three/tsl';
+import { Fn, output, pass, mrt, builtinIndirectContext, clearcoat, sample, packNormalToOctahedral, unpackOctahedralToNormal, vec2, vec3, vec4, velocity, rtt, screenUV, uniform, getViewPosition, cubeTexture } from 'three/tsl';
 import { ssr } from 'three/addons/tsl/display/SSRNode.js';
 import { depthAwareDownsample } from 'three/addons/tsl/display/DepthAwareDownsampleNode.js';
 import { jointBilateralUpsample } from 'three/addons/tsl/display/JointBilateralUpsample.js';
 import { temporalReproject } from 'three/addons/tsl/display/TemporalReprojectNode.js';
 import { reprojectedBeauty, previousViewZ } from 'three/addons/tsl/display/ReprojectedBeautyNode.js';
 import { opaqueFragment, opaqueFragmentSource } from 'three/addons/tsl/utils/OpaqueFragment.js';
+import { outermostNormalView, outermostRoughness, outermostMetalness } from 'three/addons/tsl/utils/OutermostLobe.js';
 import { ssgi } from 'three/addons/tsl/display/SSGINode.js';
 import { traa } from 'three/addons/tsl/display/TRAANode.js';
 import { createPostProcessing } from './post-processing.js';
@@ -238,11 +239,12 @@ async function initApp() {
   await showLoadingStage('Setting up visual effects, map and interface...', 'ui');
   const camera = cameraSystem.camera;
 
-  // The pre-pass draws the opaque geometry SSR and SSGI trace, without shading
+  // The pre-pass draws the opaque geometry SSR and SSGI trace, without shading. It writes the lobe SSR answers: the
+  // clearcoat where a material has one (the paint of the vehicles), the base lobe elsewhere
   const prePass = pass(scene, camera);
   const preMRT = mrt({
-    output: opaqueFragment(packNormalToOctahedral(normalView)),
-    metalrough: vec2(metalness, roughness),
+    output: opaqueFragment(packNormalToOctahedral(outermostNormalView)),
+    metalrough: vec2(outermostMetalness, outermostRoughness),
     velocity: vec4(velocity, 0, previousViewZ)
   });
   // The attachments hold data, so the blending of transparent materials does not apply
@@ -376,16 +378,23 @@ async function initApp() {
     : vec4(0, 0, 0, builder.material.transparent ? 0 : 1))(); // unlit: black, or what is behind it if transparent
   const indirectMRT = mrt({
     output,
-    indirectSpecular: resolvedLight((c) => c.radiance), // of the base lobe
+    indirectSpecular: resolvedLight((c) => { // of the lobe SSR answers: the clearcoat where there is one
+      const coat = c.lightingModel.clearcoatRadiance;
+      return coat ? clearcoat.greaterThan(0).select(coat, c.radiance) : c.radiance;
+    }),
     // before the material's own AO. The hemisphere light is in it: it fills what the sources leave open, like the environment
     indirectDiffuse: resolvedLight((c) => c.irradiance.add(c.occlusionAwareIrradiance))
   });
   // The alpha above decides what a fragment replaces, whatever the blending of its material
   indirectMRT.setBlendMode('indirectSpecular', new THREE.BlendMode(THREE.NormalBlending));
   indirectMRT.setBlendMode('indirectDiffuse', new THREE.BlendMode(THREE.NormalBlending));
+  // An intensity scales a source's light and coverage together, so the sources behind it fill what it gives up
+  // (at 0 the hero probe and the environment answer everything, and SSGI's AO is gone with its light)
+  const ssrIntensity = uniform(1);
+  const giIntensity = uniform(1);
   beautyPass.contextNode = builtinIndirectContext({
-    specular: [opaqueFragmentSource(ssrNode.getSpecularSource(reflection)), heroSpecular, noteLighting],
-    diffuse: [opaqueFragmentSource(giPass.getDiffuseSource(gi.rgb, gi.a)), heroDiffuse]
+    specular: [opaqueFragmentSource(ssrNode.getSpecularSource(reflection).mul(ssrIntensity)), heroSpecular, noteLighting],
+    diffuse: [opaqueFragmentSource(giPass.getDiffuseSource(gi.rgb, gi.a).mul(giIntensity)), heroDiffuse]
   });
 
   const sceneColor = traa(beautyPass, prePassDepth, prePassVelocity, camera);
@@ -446,6 +455,7 @@ async function initApp() {
       renderPipeline.needsUpdate = true;
     });
     const ssrGui = inspector.createParameters('SSR');
+    ssrGui.add(ssrIntensity, 'value', 0, 1, 0.01).name('Intensity');
     ssrGui.add(ssrNode.maxDistance, 'value', 1, 500, 1).name('Max distance (m)');
     ssrGui.add(ssrNode.thickness, 'value', 0, 2, 0.01).name('Thickness');
     ssrGui.add(ssrNode.mirrorBias, 'value', 0, 1, 0.01).name('Mirror bias');
@@ -457,7 +467,8 @@ async function initApp() {
     ssrGui.add(ssrAccumulated.maxFrames, 'value', 1, 64, 1).name('History frames');
     ssrGui.add(ssrAccumulated.clampIntensity, 'value', 0, 1, 0.01).name('History clamp');
     const giGui = inspector.createParameters('SSGI');
-    giGui.add(giPass.giIntensity, 'value', 0, 30, 0.1).name('GI intensity');
+    giGui.add(giIntensity, 'value', 0, 1, 0.01).name('Intensity');
+    giGui.add(giPass.giIntensity, 'value', 0, 30, 0.1).name('Bounce gain');
     giGui.add(giPass.aoIntensity, 'value', 0, 4, 0.01).name('AO intensity');
     giGui.add(giPass.sliceCount, 'value', 1, 4, 1).name('Slices');
     giGui.add(giPass.stepCount, 'value', 1, 32, 1).name('Steps');
