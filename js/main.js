@@ -9,6 +9,7 @@ import { opaqueFragment, opaqueFragmentSource } from 'three/addons/tsl/utils/Opa
 import { outermostNormalView, outermostRoughness, outermostMetalness } from 'three/addons/tsl/utils/OutermostLobe.js';
 import { ssgi } from 'three/addons/tsl/display/SSGINode.js';
 import { traa } from 'three/addons/tsl/display/TRAANode.js';
+import { fsr1 } from 'three/addons/tsl/display/FSR1Node.js';
 import { createPostProcessing } from './post-processing.js';
 import { animatedWebP } from './capture.js';
 import { ClusteredLighting } from 'three/addons/lighting/ClusteredLighting.js';
@@ -240,9 +241,13 @@ async function initApp() {
   markInit('culling');
 
   // 5. TSL RenderPipeline: geometry pre-pass, half-resolution stochastic SSR and SSGI resolved in the material BRDF,
-  //    TRAA, Bloom & Filmic Toning
+  //    selectable FSR1 upscaling or native TRAA, Bloom & Filmic Toning
   await showLoadingStage('Setting up visual effects, map and interface...', 'ui');
   const camera = cameraSystem.camera;
+  const rendering = { method: 'AMD FSR1 (75% resolution)', historySampling: 'catmull-rom' };
+  const fsrMethod = rendering.method;
+  const nativeMethod = 'TRAA (100% resolution)';
+  const sceneResolutionTargets = [];
 
   // The pre-pass draws the opaque geometry SSR and SSGI trace, without shading. It writes the lobe SSR answers: the
   // clearcoat where a material has one (the paint of the vehicles), the base lobe elsewhere
@@ -285,7 +290,11 @@ async function initApp() {
 
   const lowSceneNormal = sample((uv) => normalDecode(lowNormal.sample(uv)));
   // Joint bilateral upsample to the scene's resolution, once per pixel rather than per shaded fragment
-  const upsample = (node, options) => rtt(jointBilateralUpsample(node, lowDepth, prePassDepth, camera, options).sample(screenUV)).sample(screenUV);
+  const upsample = (node, options) => {
+    const target = rtt(jointBilateralUpsample(node, lowDepth, prePassDepth, camera, options).sample(screenUV));
+    sceneResolutionTargets.push(target);
+    return target.sample(screenUV);
+  };
 
   const ssrNode = ssr(previousBeauty, lowDepth, lowSceneNormal, {
     camera,
@@ -327,7 +336,8 @@ async function initApp() {
   const aoNode = giPass.getAONode();
   // RGB is the bounced light, alpha the AO. A few samples per pixel are far too sparse on their own, so they are
   // accumulated over time like SSR, at half resolution, before the upsample.
-  const giAccumulated = temporalReproject(rtt(vec4(giNode.sample(screenUV).rgb, aoNode.sample(screenUV).r), null, null, { resolutionScale: 0.5 }), lowDepth, lowNormal, downsample.getTextureNode('velocity'), camera, {
+  const giInput = rtt(vec4(giNode.sample(screenUV).rgb, aoNode.sample(screenUV).r), null, null, { resolutionScale: 0.5 });
+  const giAccumulated = temporalReproject(giInput, lowDepth, lowNormal, downsample.getTextureNode('velocity'), camera, {
     mode: 'diffuse',
     accumulate: true,
     normalDecode
@@ -404,8 +414,34 @@ async function initApp() {
     diffuse: [opaqueFragmentSource(giPass.getDiffuseSource(gi.rgb, gi.a).mul(giIntensity)), heroDiffuse]
   });
 
-  const sceneColor = traa(beautyPass, prePassDepth, prePassVelocity, camera);
-  const colorGrade = createPostProcessing(renderer, sceneColor);
+  // FSR1 needs an anti-aliased source: retain TRAA at scene resolution in both modes.
+  // History sampling is compiled into TRAA's resolve shader. Keep a separate graph per filter;
+  // only the selected graph renders, and its history is reset whenever the selection changes.
+  const variants = Object.fromEntries(['catmull-rom', 'linear'].map((filter) => {
+    const antialiased = traa(beautyPass, prePassDepth, prePassVelocity, camera);
+    antialiased.historySampling = filter;
+    const upscaled = fsr1(antialiased.getTextureNode()).getTextureNode();
+    const sceneColors = { [fsrMethod]: upscaled, [nativeMethod]: antialiased };
+    const grades = Object.fromEntries(Object.entries(sceneColors).map(([method, node]) => [method, createPostProcessing(renderer, node)]));
+    return [filter, { antialiased, sceneColors, grades }];
+  }));
+  const selectedVariant = () => variants[rendering.historySampling];
+  const selectedSceneColor = () => selectedVariant().sceneColors[rendering.method];
+  const allGrades = Object.values(variants).flatMap((variant) => Object.values(variant.grades));
+  // Keep time-of-day grading in sync across the inactive graphs too.
+  const colorGrade = {
+    get outputNode() { return selectedVariant().grades[rendering.method].outputNode; },
+    applyPreset: (...args) => allGrades.forEach((grade) => grade.applyPreset(...args)),
+    transitionTo: (...args) => allGrades.forEach((grade) => grade.transitionTo(...args)),
+    update: () => allGrades.forEach((grade) => grade.update())
+  };
+  function setRenderingResolution() {
+    const scale = rendering.method === fsrMethod ? 0.75 : 1;
+    for (const target of [prePass, beautyPass, previousBeauty, ...sceneResolutionTargets]) target.setResolutionScale(scale);
+    giInput.setResolutionScale(0.5 * scale);
+    selectedVariant().antialiased.reset(); // scene and temporal histories resize on their next render
+  }
+  setRenderingResolution();
   const renderPipeline = new THREE.RenderPipeline(renderer, colorGrade.outputNode);
 
   // The gear button opens the three.js Inspector, created on first use: the pipeline's buffers as outputs and the
@@ -420,6 +456,10 @@ async function initApp() {
       addInspectorParameters();
     } else {
       inspector.domElement.style.display = inspector.domElement.style.display === 'none' ? '' : 'none';
+    }
+    if (inspector.domElement.style.display !== 'none') {
+      // The gear opens the app's rendering controls, regardless of the saved Inspector tab.
+      inspector.profiler.setActiveTab(inspector.parameters.id);
     }
     inspectorButton.setAttribute('aria-pressed', String(inspector.domElement.style.display !== 'none'));
   });
@@ -442,8 +482,8 @@ async function initApp() {
     const viewZ = getViewPosition(screenUV, prePassDepth.sample(screenUV).r, uniform(camera.projectionMatrixInverse)).z;
     const outputs = {
       'Final': colorGrade.outputNode,
-      'Beauty (before TRAA)': show(beautyPass.getTextureNode('output').rgb),
-      'Beauty (after TRAA)': show(sceneColor.rgb),
+      'Beauty (before anti-aliasing)': show(beautyPass.getTextureNode('output').rgb),
+      'Beauty (after reconstruction)': show(selectedSceneColor().rgb),
       'Reprojected previous beauty': show(previousBeauty.sample(screenUV).rgb),
       'Reprojection validity': show(previousBeauty.sample(screenUV).a),
       'Depth (view distance / 200 m)': show(viewZ.negate().div(200)),
@@ -464,11 +504,29 @@ async function initApp() {
       'Hero probe': show(cubeTexture(heroTarget.texture, vec3(screenUV.x.mul(Math.PI * 2).sin().mul(screenUV.y.mul(Math.PI).sin()), screenUV.y.mul(Math.PI).cos(), screenUV.x.mul(Math.PI * 2).cos().mul(screenUV.y.mul(Math.PI).sin()))).level(0).rgb)
     };
     const state = { output: 'Final' };
-    inspector.createParameters('Output').add(state, 'output', Object.keys(outputs)).name('Show').onChange((name) => {
+    const showOutput = (name) => {
       if (outputs[name] === null) Object.assign(outputs, getIndirectOutputs());
       renderPipeline.outputNode = outputs[name];
       renderPipeline.needsUpdate = true;
-    });
+    };
+    const activeRendering = { ...rendering };
+    const updateRendering = (property, control) => {
+      if (capturing) { // the capture uses a fixed graph and resolution until it finishes
+        if (rendering[property] !== activeRendering[property]) control.setValue(activeRendering[property]);
+        return;
+      }
+      Object.assign(activeRendering, rendering);
+      setRenderingResolution();
+      outputs.Final = colorGrade.outputNode;
+      outputs['Beauty (after reconstruction)'] = show(selectedSceneColor().rgb);
+      showOutput(state.output);
+    };
+    const renderingGui = inspector.createParameters('Rendering');
+    const methodControl = renderingGui.add(rendering, 'method', [fsrMethod, nativeMethod]).name('Method')
+      .onChange(() => updateRendering('method', methodControl));
+    const samplingControl = renderingGui.add(rendering, 'historySampling', { 'Catmull-Rom': 'catmull-rom', 'Bilinear': 'linear' }).name('TRAA history interpolation')
+      .onChange(() => updateRendering('historySampling', samplingControl));
+    inspector.createParameters('Output').add(state, 'output', Object.keys(outputs)).name('Show').onChange(showOutput);
     const ssrGui = inspector.createParameters('SSR');
     ssrGui.add(ssrIntensity, 'value', 0, 1, 0.01).name('Intensity');
     ssrGui.add(ssrNode.maxDistance, 'value', 1, 500, 1).name('Max distance (m)');
