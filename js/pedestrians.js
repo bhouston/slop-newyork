@@ -12,6 +12,7 @@ import {
   instanceIndex,
   attributeArray,
   normalLocal,
+  positionPrevious,
   varying,
   vertexStage,
   cross,
@@ -874,7 +875,7 @@ function personLook(pose, base) {
  * outfit codes; the near LOD (`detail = 1`) paints the clothes' cut, the face and soft contact shading per body part in
  * the fragment stage, while the far LOD (`detail = 0`) shades its part colours directly in the vertex stage.
  */
-function createPersonMaterial(pose, detail = 1) {
+function createPersonMaterial(pose, previous, detail = 1) {
   const mat = new THREE.MeshPhysicalNodeMaterial({ metalness: 0 });
   const base = int(instanceIndex).mul(STRIDE);
   const info = pose.element(base.add(STRIDE - 1)); // seed, female, girth, hair
@@ -894,7 +895,7 @@ function createPersonMaterial(pose, detail = 1) {
   const isHead = isPart(PART.HEAD);
   const isHairPart = step(PART.HAIR - 0.5, partId);
 
-  mat.positionNode = Fn(() => {
+  mat.positionNode = Fn((builder) => {
     const skin = skinAttr;
     const extra = extraAttr;
     // hair volume on the shell (part 6), hair length on the long hair (part 7)
@@ -914,11 +915,19 @@ function createPersonMaterial(pose, detail = 1) {
     const ia = base.add(int(skin.x).mul(2));
     const ib = base.add(int(skin.y).mul(2));
     const qa = pose.element(ia);
-    const ta = pose.element(ia.add(1));
     const qb = pose.element(ib);
-    const tb = pose.element(ib.add(1));
     normalLocal.assign(normalize(mix(qrot(qa, n), qrot(qb, n), w)));
-    return mix(qrot(qa, p).mul(ta.w).add(ta.xyz), qrot(qb, p).mul(tb.w).add(tb.xyz), w);
+    const skinned = (bones, a, b) => {
+      const ta = bones.element(a.add(1)), tb = bones.element(b.add(1));
+      return mix(qrot(bones.element(a), p).mul(ta.w).add(ta.xyz), qrot(bones.element(b), p).mul(tb.w).add(tb.xyz), w);
+    };
+    // Motion vectors (only in the pass that writes them): the same vertex under the bones of a frame ago. Without it
+    // the velocity is measured from the bind pose at the origin, and TRAA and the SSR / SSGI histories reject people
+    if (builder.needsPreviousData()) {
+      const previousBase = int(instanceIndex).mul(APPEARANCE);
+      positionPrevious.assign(skinned(previous, previousBase.add(int(skin.x).mul(2)), previousBase.add(int(skin.y).mul(2))));
+    }
+    return skinned(pose, ia, ib);
   })();
 
   const roughnessVal = mix(
@@ -1318,14 +1327,16 @@ class PersonCrowd {
     const levels = Number.isFinite(farDistance) ? [1, 0] : [1];
     this.lods = levels.map((detail) => {
       const pose = attributeArray(maxCount * STRIDE, 'vec4').toReadOnly();
-      const mesh = new THREE.Mesh(buildPersonGeometry(detail), createPersonMaterial(pose, detail));
+      // The bones each person had a frame ago, in the same slots (for the motion vectors)
+      const previous = attributeArray(maxCount * APPEARANCE, 'vec4').toReadOnly();
+      const mesh = new THREE.Mesh(buildPersonGeometry(detail), createPersonMaterial(pose, previous, detail));
       mesh.name = detail ? 'PeopleNear' : 'PeopleFar';
       mesh.count = 1; // one (degenerate) person until warm-up finishes, so the pipelines compile up front
       mesh.frustumCulled = false;
       mesh.castShadow = Boolean(castShadow && detail > 0);
       mesh.receiveShadow = true;
       mesh.matrixAutoUpdate = false;
-      return { pose, mesh, count: 0, max: maxCount, hasZero: true };
+      return { pose, previous, mesh, count: 0, max: maxCount, hasZero: true };
     });
     this.meshes = this.lods.map((l) => l.mesh);
   }
@@ -1338,6 +1349,12 @@ class PersonCrowd {
     const l = this.lods.length > 1 && distance > this.farDistance ? this.lods[1] : this.lods[0];
     if (l.count >= l.max) return;
     l.pose.value.array.set(rig.pose, l.count * STRIDE * 4);
+    // A person's slot changes from frame to frame, so the rig keeps the bones it was last drawn with. One that was not
+    // drawn a frame ago (culled, or new) has not moved as far as the motion vectors are concerned
+    const bones = rig.pose.subarray(0, APPEARANCE * 4);
+    l.previous.value.array.set(rig.drawnAt === this.updates - 1 ? rig.drawnPose : bones, l.count * APPEARANCE * 4);
+    rig.drawnPose.set(bones);
+    rig.drawnAt = this.updates;
     l.count++;
   }
 
@@ -1365,10 +1382,11 @@ class PersonCrowd {
       l.hasZero = false;
       l.mesh.count = l.count;
       l.mesh.visible = true;
-      const attr = l.pose.value;
-      attr.clearUpdateRanges();
-      attr.addUpdateRange(0, l.count * STRIDE * 4);
-      attr.needsUpdate = true;
+      for (const [attr, stride] of [[l.pose.value, STRIDE], [l.previous.value, APPEARANCE]]) {
+        attr.clearUpdateRanges();
+        attr.addUpdateRange(0, l.count * stride * 4);
+        attr.needsUpdate = true;
+      }
     }
   }
 }
@@ -1572,6 +1590,8 @@ class PersonRig {
     this.posed = false; // lying or getting up, off the gait: the next walking update stands it afresh
     this.feet = [makeFoot(1), makeFoot(-1)];
     this.pose = new Float32Array(STRIDE * 4);
+    this.drawnPose = new Float32Array(APPEARANCE * 4); // the bones of the frame it was last drawn in (see PersonCrowd.add)
+    this.drawnAt = -2;
     this.pose.set(personAppearance(seed, this.female), APPEARANCE * 4);
     this.pose.set([seed, this.female, girth, hair], (STRIDE - 1) * 4);
   }

@@ -249,6 +249,36 @@ const pedestriansModule = loadModule(pedestriansSource, {
 const { PERSON_BONES, PersonCrowd, PersonRig, buildPersonGeometry } = pedestriansModule;
 const STRIDE = 34; // 15 bones x 2 vec4s, 3 appearance vec4s, the info vec4
 
+test('PersonCrowd gives each slot the bones its person was drawn with a frame ago', () => {
+  const crowd = new PersonCrowd(8, { farDistance: Infinity });
+  const previous = crowd.lods[0].previous.value.array;
+  const a = new PersonRig({ seed: 1.5 });
+  const b = new PersonRig({ seed: 2.5 });
+  const draw = (...rigs) => {
+    crowd.begin();
+    for (const rig of rigs) crowd.add(rig, 0);
+    crowd.end();
+  };
+  const BONES = 30 * 4;
+
+  a.pose[0] = 1;
+  b.pose[0] = 5;
+  draw(a, b);
+  assert.deepEqual([previous[0], previous[BONES]], [1, 5], 'first drawn: not moved');
+
+  a.pose[0] = 2;
+  b.pose[0] = 6;
+  draw(b, a); // the slots swap
+  assert.deepEqual([previous[0], previous[BONES]], [5, 1], 'the bones follow the person, not the slot');
+
+  b.pose[0] = 7;
+  draw(b); // a is culled
+  a.pose[0] = 3;
+  b.pose[0] = 8;
+  draw(a, b);
+  assert.deepEqual([previous[0], previous[BONES]], [3, 7], 'back from being culled: not moved');
+});
+
 test('PersonCrowd keeps 1 warm-up instance for 2 updates, then hides empty LODs', () => {
   const crowd = new PersonCrowd(8, { farDistance: 34 });
   const rig = new PersonRig({ seed: 2.5 });
