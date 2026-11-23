@@ -10,6 +10,7 @@ import { outermostNormalView, outermostRoughness, outermostMetalness } from 'thr
 import { ssgi } from 'three/addons/tsl/display/SSGINode.js';
 import { traa } from 'three/addons/tsl/display/TRAANode.js';
 import { createPostProcessing } from './post-processing.js';
+import { animatedWebP } from './capture.js';
 import { ClusteredLighting } from 'three/addons/lighting/ClusteredLighting.js';
 import { getLocationLabel, isTypingInField, ROADS, NYC_LANDMARKS, TELEPORT_LOCATIONS } from './city-config.js';
 import { buildCityGrid } from './city-grid.js';
@@ -416,8 +417,22 @@ async function initApp() {
     }
     inspectorButton.setAttribute('aria-pressed', String(inspector.domElement.style.display !== 'none'));
   });
+  const show = (node) => vec4(vec3(node), 1);
+  // The inspector's two indirect light outputs, set up when first asked for: the beauty pass writes them to
+  // attachments of their own, which recompiles its shaders (a pause).
+  // ponytail: the attachments stay until the page is reloaded; drop them on leaving if their cost gets in the way
+  let indirectOutputs = null;
+  function getIndirectOutputs() {
+    if (indirectOutputs === null) {
+      beautyPass.setMRT(indirectMRT);
+      indirectOutputs = {
+        'Indirect Specular': show(beautyPass.getTextureNode('indirectSpecular').rgb),
+        'Indirect Diffuse': show(beautyPass.getTextureNode('indirectDiffuse').rgb.div(Math.PI)) // as a white surface reflects it
+      };
+    }
+    return indirectOutputs;
+  }
   function addInspectorParameters() {
-    const show = (node) => vec4(vec3(node), 1);
     const viewZ = getViewPosition(screenUV, prePassDepth.sample(screenUV).r, uniform(camera.projectionMatrixInverse)).z;
     const outputs = {
       'Final': colorGrade.outputNode,
@@ -444,13 +459,7 @@ async function initApp() {
     };
     const state = { output: 'Final' };
     inspector.createParameters('Output').add(state, 'output', Object.keys(outputs)).name('Show').onChange((name) => {
-      if (outputs[name] === null) {
-        // The beauty pass writes the two to attachments of their own, which recompiles its shaders (a pause).
-        // ponytail: the attachments stay until the page is reloaded; drop them on leaving if their cost gets in the way
-        beautyPass.setMRT(indirectMRT);
-        outputs['Indirect Specular'] = show(beautyPass.getTextureNode('indirectSpecular').rgb);
-        outputs['Indirect Diffuse'] = show(beautyPass.getTextureNode('indirectDiffuse').rgb.div(Math.PI)); // as a white surface reflects it
-      }
+      if (outputs[name] === null) Object.assign(outputs, getIndirectOutputs());
       renderPipeline.outputNode = outputs[name];
       renderPipeline.needsUpdate = true;
     });
@@ -483,6 +492,75 @@ async function initApp() {
     const heroGui = inspector.createParameters('Hero probe');
     heroGui.add(heroIntensity, 'value', 0, 1, 0.01).name('Coverage (0 = off)');
   }
+
+  // The capture button saves the lighting breakdown of the current view as an animated WebP: the beauty, its two
+  // indirect lights, then the beauty again with the hero probe, SSGI and SSR switched off one after the other. The
+  // world stands still meanwhile (see the loop), each frame is rendered at 1920 x 1080 and labelled, and the file is
+  // assembled in the page (no server).
+  const CAPTURE_WIDTH = 1920, CAPTURE_HEIGHT = 1080;
+  const CAPTURE_SETTLE_FRAMES = 72; // for TRAA and the SSR / SSGI histories (up to 64 frames) to converge
+  const CAPTURE_FRAME_MS = 1500;
+  let capturing = false;
+  let afterCaptureFrame = null; // called by the loop once the frame is rendered, while the canvas still holds it
+  const captureFrame = (grab) => new Promise((resolve) => {
+    afterCaptureFrame = () => { afterCaptureFrame = null; resolve(grab?.()); };
+  });
+  const captureButton = document.getElementById('btn-capture');
+  if (captureButton) captureButton.addEventListener('click', async () => {
+    if (capturing) return;
+    const showOutput = (node) => { renderPipeline.outputNode = node; renderPipeline.needsUpdate = true; };
+    const steps = [
+      ['Beauty', () => showOutput(colorGrade.outputNode)],
+      ['Indirect specular', () => showOutput(getIndirectOutputs()['Indirect Specular'])],
+      ['Indirect diffuse', () => showOutput(getIndirectOutputs()['Indirect Diffuse'])],
+      ['Beauty', () => showOutput(colorGrade.outputNode)],
+      ['Hero probe off', () => { heroIntensity.value = 0; }],
+      ['Hero probe and SSGI off', () => { giIntensity.value = 0; }],
+      ['Hero probe, SSGI and SSR off', () => { ssrIntensity.value = 0; }]
+    ];
+    const before = { output: renderPipeline.outputNode, hero: heroIntensity.value, gi: giIntensity.value, ssr: ssrIntensity.value };
+    const title = captureButton.title;
+    const canvas = document.createElement('canvas');
+    canvas.width = CAPTURE_WIDTH;
+    canvas.height = CAPTURE_HEIGHT;
+    const ctx = canvas.getContext('2d', { alpha: false });
+    capturing = true;
+    captureButton.disabled = true;
+    try {
+      renderer.setSize(CAPTURE_WIDTH, CAPTURE_HEIGHT, false); // the drawing buffer only: the page keeps its layout
+      cameraSystem.onResize(CAPTURE_WIDTH, CAPTURE_HEIGHT);
+      const stills = [];
+      for (const [i, [label, apply]] of steps.entries()) {
+        captureButton.title = `Capturing ${i + 1} / ${steps.length}: ${label}`;
+        apply();
+        for (let f = 0; f < CAPTURE_SETTLE_FRAMES; f++) await captureFrame();
+        await captureFrame(() => ctx.drawImage(renderer.domElement, 0, 0, CAPTURE_WIDTH, CAPTURE_HEIGHT));
+        ctx.font = '600 40px system-ui, sans-serif';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+        ctx.fillRect(40, CAPTURE_HEIGHT - 120, ctx.measureText(label).width + 48, 80);
+        ctx.fillStyle = '#fff';
+        ctx.fillText(label, 64, CAPTURE_HEIGHT - 80);
+        const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/webp', 0.92));
+        stills.push(new Uint8Array(await blob.arrayBuffer()));
+      }
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(new Blob([animatedWebP(stills, CAPTURE_WIDTH, CAPTURE_HEIGHT, CAPTURE_FRAME_MS)], { type: 'image/webp' }));
+      link.download = 'slop-newyork-lighting-breakdown.webp';
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(link.href), 60000);
+    } finally {
+      heroIntensity.value = before.hero;
+      giIntensity.value = before.gi;
+      ssrIntensity.value = before.ssr;
+      showOutput(before.output);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      cameraSystem.onResize(window.innerWidth, window.innerHeight);
+      capturing = false;
+      captureButton.disabled = false;
+      captureButton.title = title;
+    }
+  });
 
   // 6. Wire UI Controls (Strictly using safe DOM APIs: textContent, classList, addEventListener)
   const modeButtons = document.querySelectorAll('[data-mode]');
@@ -817,6 +895,7 @@ async function initApp() {
   });
 
   window.addEventListener('resize', () => {
+    if (capturing) return; // the capture sets the window's size again when it ends
     cameraSystem.onResize(window.innerWidth, window.innerHeight);
     renderer.setSize(window.innerWidth, window.innerHeight);
     placeModeIndicator();
@@ -946,6 +1025,12 @@ async function initApp() {
     const rawDt = (now - lastTime) * 0.001;
     lastTime = now;
     const dt = Math.min(Math.max(rawDt, 0.001), 0.05);
+    // A capture holds the world and the camera still, so its frames differ in their lighting alone
+    if (capturing) {
+      renderPipeline.render();
+      if (afterCaptureFrame) afterCaptureFrame();
+      return;
+    }
     elapsed += dt;
 
     // Update 3rd-person controllers, camera, signals, traffic & vehicle collisions, building LODs, and dynamic shadow focus
