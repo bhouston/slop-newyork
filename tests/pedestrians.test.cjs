@@ -241,7 +241,7 @@ const ragdollModule = loadModule(readFileSync(join(__dirname, '../js/ragdoll.js'
 const pedestriansModule = loadModule(pedestriansSource, {
   imports: {
     './ragdoll.js': ragdollModule,
-    'three/webgpu': { Vector3, Quaternion, Matrix4, BufferAttribute, BufferGeometry, Float32BufferAttribute, MeshStandardNodeMaterial, Mesh },
+    'three/webgpu': { Vector3, Quaternion, Matrix4, BufferAttribute, BufferGeometry, Float32BufferAttribute, MeshStandardNodeMaterial, MeshPhysicalNodeMaterial: MeshStandardNodeMaterial, Mesh },
     'three/tsl': tslStub,
     'three/addons/utils/BufferGeometryUtils.js': { mergeGeometries }
   }

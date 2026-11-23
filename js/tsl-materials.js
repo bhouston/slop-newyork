@@ -717,10 +717,7 @@ function createBuildingEntrance(facade, trim, local, modern = false) {
       const choice = hash2D(vec2(boxSeed, floor(grid)));
       const paint = modern ? color(0x282d32) : mix(color(0x49372a), color(0x263d33), step(0.5, choice));
       const door = mix(mix(paint, paint.mul(0.62), panel), color(0x14191c), seam);
-      const view = normalize(cameraPosition.sub(positionWorld));
-      const fresnel = pow(float(1).sub(abs(dot(view, facadeWorldNormal))).clamp(0, 1), 2);
-      const glassColor = mix(color(0x23302c), cityUniforms.uSkyHorizonColor, fresnel.mul(0.5).add(0.10));
-      const doorColor = mix(mix(door, glassColor, glazing), color(0xa6a69b), handle);
+      const doorColor = mix(mix(door, color(0x23302c), glazing), color(0xa6a69b), handle);
       result.assign(mix(mix(trim.mul(0.85), color(0x101515), recess), doorColor, leaf));
     });
     return result;
@@ -1347,10 +1344,8 @@ function createChryslerCrownMaterial() {
     const innerGlass = mask.y;
     const radialSeam = mask.z;
 
-    const viewDir = normalize(cameraPosition.sub(positionWorld));
-    const fresnel = pow(clamp(float(1.0).sub(abs(dot(viewDir, normalWorld))), 0.0, 1.0), 1.6);
-    const skyReflect = mix(cityUniforms.uSkyHorizonColor, color(0xffffff), 0.60);
-    const steelSurface = mix(mix(cSteel, cSeam, radialSeam.mul(0.55)), skyReflect, fresnel.mul(0.68));
+    // Bare stainless steel: a metal, whose reflections of the sky and the city come from its BRDF
+    const steelSurface = mix(cSteel, cSeam, radialSeam.mul(0.55));
 
     const glowAmt = clamp(cityUniforms.uInteriorGlow.mul(0.85).add(0.28), 0.28, 1.0);
     const glassCol = mix(cWindowGlass, cGoldGlow, glowAmt.mul(0.78));
@@ -1956,8 +1951,8 @@ const roadTarSnakes = Fn(([wxz, px]) => {
  * Lane markings are separate geometry built from the road network (js/road-paint.js).
  */
 function createRoadSurfaceMaterial() {
-  const mat = new THREE.MeshStandardNodeMaterial({
-    metalness: 0.24,
+  const mat = new THREE.MeshPhysicalNodeMaterial({
+    metalness: 0,
     roughness: 0.48
   });
 
@@ -2034,8 +2029,6 @@ function createRoadSurfaceMaterial() {
   const damp = wet.x;
   const puddle = wet.y;
   const film = wet.z;
-  const viewDir = normalize(cameraPosition.sub(positionWorld));
-  const waterFresnel = pow(float(1.0).sub(clamp(viewDir.y, 0.0, 1.0)), 5.0).mul(0.98).add(0.02);
 
   mat.aoNode = canyonSkyAONode();
 
@@ -2095,16 +2088,13 @@ function createRoadSurfaceMaterial() {
       .sub(oilDrip.mul(0.18))
       .sub(patchCover.mul(patchFresh).mul(0.06))
       .add(pothole.mul(0.06));
-    // The wet film only takes the edge off the asphalt's mattness (a soft sheen, too rough for SSR); real gloss is kept
-    // for the damp stains and the standing water
-    const filmed = mix(dry, float(0.68), film.mul(0.7));
-    const wetRough = mix(filmed, float(0.4), damp.mul(0.85));
-    return mix(wetRough, float(0.1), puddle);
+    return dry;
   })();
 
-  // Water's Fresnel (F0 = 0.02): weights SSR & trades diffuse for reflection in pools (fully), damp stains (partly) and
-  // the wet film (barely)
-  mat.metalnessNode = clamp(waterFresnel.mul(1.6), 0.0, 0.85).mul(max(puddle, max(damp.mul(0.35), film.mul(0.15))));
+  // The water is a clearcoat over the asphalt, with its own Fresnel: whole in pools, partial on damp stains and barely
+  // there in the wet film, which only takes the edge off the asphalt's mattness (a soft sheen, too rough for SSR)
+  mat.clearcoatNode = max(puddle, max(damp.mul(0.35), film.mul(0.15)));
+  mat.clearcoatRoughnessNode = mix(mix(float(0.68), float(0.4), damp.mul(0.85)), float(0.1), puddle);
 
   // Footprint-gated asphalt relief via bumpNormal (from CityGenerator.js): a gentle swell & sag of the paving, shallow
   // ruts & ripples, 6 mm ravelled coarse texture + 2.2 mm & 1.6 mm aggregate grit, stone chips, hairline cracks, raised
@@ -2143,26 +2133,6 @@ function createRoadSurfaceMaterial() {
     const height = swell.add(ripples).add(coarseGrit).add(midGrit).add(fineGrit).add(chipRelief).add(snakeBead).sub(crackGroove)
       .add(patchStep).add(sealBead).sub(bowl).add(manhole);
     return bumpNormal(height.mul(float(1.0).sub(puddle)));
-  })();
-
-  mat.emissiveNode = Fn(() => {
-    const wx = positionWorld.x;
-    const wz = positionWorld.z;
-
-    const roadFresnel = pow(clamp(float(1.0).sub(abs(viewDir.y)), 0.0, 1.0), 2.3);
-
-    const skyMirror = mix(cityUniforms.uSkyHorizonColor, cityUniforms.uSkyTopColor, 0.40).mul(0.10).toVar();
-
-    // Neon tint only within reach of Times Square
-    const tsDist = clamp(float(1.0).sub(length(vec2(wx.add(212.0), wz.add(45.0))).div(145.0)), 0.0, 1.0).toVar();
-    const reflectCol = vec3(skyMirror).toVar();
-    If(tsDist.greaterThan(0.0), () => {
-      const neonPatch = tableNoise(vec2(wx.mul(0.15), wz.mul(0.15))).x;
-      const neonCol = mix(color(0xff2a85), color(0x2ad4ff), neonPatch).mul(0.32);
-      reflectCol.assign(mix(skyMirror, neonCol, tsDist.mul(0.65)));
-    });
-
-    return reflectCol.mul(max(puddle, film.mul(0.35))).mul(roadFresnel).mul(cityUniforms.uInteriorGlow).mul(0.07);
   })();
 
   return mat;
@@ -2246,7 +2216,7 @@ function createRoadPaintMaterial() {
  * (Ported from SidewalkGenerator.js)
  */
 function createSidewalkMaterial() {
-  const mat = new THREE.MeshStandardNodeMaterial({
+  const mat = new THREE.MeshPhysicalNodeMaterial({
     metalness: 0.0,
     roughness: 0.88
   });
@@ -2261,7 +2231,6 @@ function createSidewalkMaterial() {
     .add(noise2D(vec2(positionWorld.x.mul(0.38), positionWorld.z.mul(0.38))).mul(0.35));
   const swWet = roadWetMasks(swField, 0.06);
   const swPuddle = swWet.y.mul(smoothstep(0.5, 0.9, normalWorldGeometry.y));
-  const swFresnel = pow(float(1.0).sub(clamp(normalize(cameraPosition.sub(positionWorld)).y, 0.0, 1.0)), 5.0).mul(0.98).add(0.02);
   const pixelSize = length(fwidth(positionWorld.xz));
 
   // 5 ft (1.524 m) flags poured in place: the flag, where in it (-0.5 .. 0.5) and how far to its tooled joints (m)
@@ -2355,12 +2324,12 @@ function createSidewalkMaterial() {
 
   mat.roughnessNode = Fn(() => {
     const dry = float(0.9).sub(flagHash.mul(0.06)).sub(tooledBand.mul(0.1)).sub(gum.mul(0.25));
-    const wetRough = mix(dry, float(0.55), max(swWet.z, swWet.x.mul(0.7)));
-    return mix(wetRough, float(0.2), swPuddle);
+    return dry;
   })();
 
-  // Water's Fresnel (F0 = 0.02) on pools & the wet film, as for the roadway
-  mat.metalnessNode = clamp(swFresnel.mul(1.6), 0.0, 0.85).mul(max(swPuddle, swWet.z.mul(0.3)));
+  // The water on the pools & the wet film is a clearcoat over the flags, as for the roadway
+  mat.clearcoatNode = max(swPuddle, swWet.z.mul(0.3));
+  mat.clearcoatRoughnessNode = mix(float(0.55), float(0.2), swPuddle);
 
   // 6 mm tooled joint grooves with rounded edges, flags heaved a little out of true by tree roots & frost, hairline
   // cracks, gum blobs and concrete grain via bumpNormal. Edges ramp over >= 2 px so nothing sparkles along the joints.
@@ -2958,9 +2927,11 @@ function getWaterWaveTexture() {
  * - Park lakes, the Reservoir & fountains (well above the harbour) get finer, calmer ripples and a greener, duller body.
  */
 function createWaterMaterial() {
-  const mat = new THREE.MeshStandardNodeMaterial({
+  // Water is a dielectric (IOR 1.33, F0 = 0.02): its BRDF's Fresnel trades the body colour for reflection at grazing angles
+  const mat = new THREE.MeshPhysicalNodeMaterial({
     metalness: 0.0,
-    roughness: 0.25
+    roughness: 0.25,
+    ior: 1.33
   });
 
   const waveTex = getWaterWaveTexture();
@@ -3016,8 +2987,8 @@ function createWaterMaterial() {
   mat.roughnessNode = clamp(pow(variance, 0.25).add(pond.mul(0.05)), 0.08, 0.65);
 
   const viewDir = normalize(cameraPosition.sub(positionWorld));
+  // (weights the skyline's reflection in the emissive below, which is beyond the reach of SSR)
   const fresnel = pow(float(1.0).sub(clamp(dot(waterNormal, viewDir), 0.0, 1.0)), 5.0).mul(0.98).add(0.02);
-  mat.metalnessNode = clamp(fresnel.mul(1.6), 0.0, 0.9);
 
   // Sediment-laden estuary: deep blue-green grey ↔ silty olive grey; thin sunlit crests transmit a greener tint
   mat.colorNode = Fn(() => {

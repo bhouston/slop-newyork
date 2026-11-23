@@ -29,9 +29,7 @@ import {
   mix,
   step,
   smoothstep,
-  select,
-  normalView,
-  positionViewDirection
+  select
 } from 'three/tsl';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { RAGDOLL_POINTS } from './ragdoll.js';
@@ -877,7 +875,7 @@ function personLook(pose, base) {
  * the fragment stage, while the far LOD (`detail = 0`) shades its part colours directly in the vertex stage.
  */
 function createPersonMaterial(pose, detail = 1) {
-  const mat = new THREE.MeshStandardNodeMaterial({ metalness: 0 });
+  const mat = new THREE.MeshPhysicalNodeMaterial({ metalness: 0 });
   const base = int(instanceIndex).mul(STRIDE);
   const info = pose.element(base.add(STRIDE - 1)); // seed, female, girth, hair
   const look = personLook(pose, base);
@@ -1052,7 +1050,6 @@ function createPersonMaterial(pose, detail = 1) {
   const gz = vExtra.y;
   const limbSide = sign(q.x);
   const hemY = fLook.hemY;
-  const ndv = clamp(dot(normalView, positionViewDirection), 0.0, 1.0);
 
   mat.colorNode = Fn(() => {
     const o = outfit();
@@ -1284,19 +1281,19 @@ function createPersonMaterial(pose, detail = 1) {
         outCol.assign(mix(skinCol, colB, hairMask));
       });
 
-    // Cloth catches light at grazing angles (fibres standing off the surface); contact shading darkens the creases
-    const cloth = float(1.0).sub(max(fSkin, fHair));
-    const grazing = float(1.0).sub(ndv);
-    const sheen = grazing.mul(grazing).mul(grazing).mul(0.28).mul(cloth);
+    // Contact shading darkens the creases.
     // Light scattered under the skin comes back out redder than its surface: warm the face & hands a little, so cool
     // sky light doesn't leave them grey
     const warm = mix(vec3(1.0), vec3(1.07, 0.97, 0.9), fSkin);
-    return outCol.mul(warm).mul(sheen.add(1.0)).mul(occlusion.mul(0.45).add(0.55));
+    return outCol.mul(warm).mul(occlusion.mul(0.45).add(0.55));
   })();
 
   mat.aoNode = occlusion;
   // Cloth matte, skin a little glossier, hair in between, leather shoes polished
   const fragSkin = max(isPartF(pId, PART.HAND), isPartF(pId, PART.HEAD));
+  // Cloth catches light at grazing angles (fibres standing off the surface): a sheen lobe in the cloth's own colour
+  mat.sheenNode = mat.colorNode.mul(float(1.0).sub(max(fragSkin, step(PART.HAIR - 0.5, pId))));
+  mat.sheenRoughnessNode = float(0.5);
   mat.roughnessNode = mix(
     mix(mix(float(0.86), float(0.55), fragSkin), float(0.74), step(PART.HAIR - 0.5, pId)),
     float(0.38),

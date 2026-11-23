@@ -846,18 +846,21 @@ function createLoftedBusMaterial() {
 
   const col = mix(mix(body, color(0x191d22), isTrim), color(0xd0d5dc), isPod);
 
-  const mat = new THREE.MeshStandardNodeMaterial();
+  const mat = new THREE.MeshPhysicalNodeMaterial();
   mat.colorNode = col;
   mat.roughnessNode = mix(
     mix(
-      mix(float(0.16), float(0.06), max(glass, max(headLamp, rearLens))),
+      mix(float(0.5), float(0.06), max(glass, max(headLamp, rearLens))),
       float(0.68),
       max(isTrim, max(archFlareMask, seal.mul(one.sub(glass))))
     ),
     float(0.36),
     isPod
   );
-  mat.metalnessNode = mix(mix(float(0.24), mix(float(0.16), float(0.36), fresnel), glass), float(0.06), max(isTrim, isPod));
+  mat.metalnessNode = mix(mix(float(0.0), mix(float(0.16), float(0.36), fresnel), glass), float(0.06), max(isTrim, isPod));
+  // The livery is a slightly rough paint under a glossy clearcoat, as on the cars; the glass, lamps, seals and trim are bare
+  mat.clearcoatNode = one.sub(max(max(glass, max(headLamp, rearLens)), max(max(isTrim, isPod), max(archFlareMask, seal))));
+  mat.clearcoatRoughnessNode = float(0.05);
 
   const brake = state.x;
   const blink = max(state.y.mul(step(0.0, p.x)), state.z.mul(step(p.x, 0.0)));

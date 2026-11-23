@@ -142,7 +142,7 @@ const sandbox = {
   Math,
   Infinity,
   THREE: {
-    MeshStandardNodeMaterial: class {
+    MeshPhysicalNodeMaterial: class {
       constructor(opts) { Object.assign(this, opts); }
     }
   },
