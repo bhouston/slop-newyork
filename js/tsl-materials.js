@@ -575,6 +575,10 @@ function getStorefrontSignTexture() {
   return _storefrontSignTexture;
 }
 
+// Shop windows are clear plate glass: a dielectric mirror in front of the room, which is emitted through it.
+const STOREFRONT_GLASS_ROUGHNESS = 0.03; // sharp highlights and reflections
+const STOREFRONT_DAYLIGHT = 0.3; // how much of the sky's light reaches the room behind the glass
+
 // Shops span several upstairs bays; every material output shares their glazing and door layout.
 function createStorefront(facade, seed, local) {
   const { wallS, wallW, boxSeed, uCoord, vCoord, isGroundFloor, isRoof, solid, coping } = facade;
@@ -615,8 +619,9 @@ function createStorefront(facade, seed, local) {
   })().toVar();
   const frame = mix(mix(paint, color(0x92958d), metal), color(0xe0d7bb), signInk);
 
+  // The room as it is seen through the pane, as radiance: clear glass has no colour of its own
   const interior = Fn(() => {
-    const result = vec4(0).toVar();
+    const result = vec3(0).toVar();
     If(mask.greaterThan(0.001), () => {
       const light = mix(color(0xffd49a), color(0xe0edee), step(0.58, choice));
       const room = color(0x343330).toVar();
@@ -667,17 +672,21 @@ function createStorefront(facade, seed, local) {
       });
       const view = normalize(cameraPosition.sub(positionWorld));
       const fresnel = pow(clamp(float(1).sub(abs(dot(view, facadeWorldNormal))), 0, 1), 2);
-      const glassColor = mix(room.mul(light).mul(mix(0.35, 0.95, lit)), cityUniforms.uSkyHorizonColor, fresnel.mul(0.65).add(0.10));
-      result.assign(vec4(mix(glassColor, light, fixture.mul(lit)), lit.mul(float(0.55).add(fixture.mul(2.2))).mul(float(1).sub(fresnel.mul(0.8)))));
+      // Lit by its own lamps and by the daylight that enters; less of it is seen at grazing angles, where the pane
+      // reflects the street instead (the material's specular lobe: the sun, SSR and the environment)
+      const lamps = lit.mul(float(0.55).add(fixture.mul(2.2))).mul(cityUniforms.uInteriorGlow);
+      const seen = mix(room.mul(light).mul(mix(0.35, 0.95, lit)), light, fixture.mul(lit));
+      result.assign(seen.mul(cityUniforms.uSkyHorizonColor.mul(STOREFRONT_DAYLIGHT).add(lamps)).mul(float(1).sub(fresnel.mul(0.8))));
     });
     return result;
   })().toVar();
 
   return {
     mask,
-    color: mix(frame, interior.rgb, glazing),
-    emissive: interior.rgb.mul(interior.a).mul(glazing).add(color(0xe0d7bb).mul(signInk).mul(lit).mul(0.12)).mul(cityUniforms.uInteriorGlow),
-    roughness: mix(float(0.58), float(0.14).add(float(1).sub(smoothstep(0.3, 0.9, y)).mul(0.16)), glazing),
+    glazing,
+    color: frame.mul(float(1).sub(glazing)),
+    emissive: interior.mul(glazing).add(color(0xe0d7bb).mul(signInk).mul(lit).mul(0.12).mul(cityUniforms.uInteriorGlow)),
+    roughness: mix(float(0.58), STOREFRONT_GLASS_ROUGHNESS, glazing),
     relief: float(1).sub(glazing).mul(0.008).add(handle.mul(0.004))
   };
 }
@@ -873,6 +882,7 @@ function createCurtainWallMaterial(opts = {}) {
     const surface = mix(mix(glassOrFrame, float(0.36), coping), storefront.roughness, storefront.mask);
     return mix(surface, entrance.roughness, entrance.mask);
   })();
+  mat.metalnessNode = mix(float(0.72), 0, storefront.mask.mul(storefront.glazing)); // shop glass is a dielectric
 
   // Hardware derivative bumpNormal for raised curtain-wall mullions & spandrel channels (ramps >= 2px, see pre-war)
   mat.normalNode = Fn(() => {
@@ -1182,6 +1192,7 @@ function createPreWarBuildingMaterial(opts = {}) {
     const surface = mix(mix(float(0.78).add(stoneGrain), glassRough, isWindow), storefront.roughness, storefront.mask);
     return mix(surface, entrance.roughness, entrance.mask);
   })();
+  mat.metalnessNode = mix(float(0.06), 0, storefront.mask.mul(storefront.glazing)); // shop glass is a dielectric
 
   // Hardware derivative bumpNormal for domed brickwork, stone courses, recessed windows & AC louvers. Edges ramp over
   // >= 2px and the fine brick & louver relief fades before it shrinks to pixels: sharper height steps turn into
