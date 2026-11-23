@@ -93,6 +93,10 @@ async function initApp() {
     powerPreference: 'high-performance',
     reversedDepthBuffer: true
   });
+  // Every vertex shader computes its position the same way whatever else it computes (WGSL's @invariant): the beauty
+  // pass tests against the pre-pass's depth, and the two shaders of a material differ in everything but the position.
+  // Without it the compiler is free to round the two differently, and the beauty loses fragments to its own depth.
+  renderer.contextNode.value.invariant = true;
   renderer.setPixelRatio(1.0);
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.shadowMap.enabled = true;
