@@ -1921,26 +1921,26 @@ function createPartCollector() {
 }
 
 // Stone / metal surfaces (sRGB swatch) with a little world-space weathering, optional ashlar coursing (block height
-// in metres) and optional night floodlighting. The swatch & amounts are uniforms, so every coursed (or plain) and
-// floodlit (or not) landmark shares one shader
+// in metres) and optional night floodlighting. The swatch & amounts are uniforms and both options are always in the
+// graph (switched off by a zero uniform), so every coursed (or plain) and floodlit (or not) landmark shares one shader
 function createLandmarkMaterial(rgb, { roughness = 0.8, metalness = 0.0, flood = 0.0, noise = 0.18, courses = 0, side = THREE.FrontSide } = {}) {
   const mat = new THREE.MeshStandardNodeMaterial({ roughness, metalness, side });
   const base = srgbUniform(rgb[0], rgb[1], rgb[2]);
   const uNoise = uniform(noise);
   const n = valueNoise(positionWorld.xz.mul(0.35).add(positionWorld.y.mul(0.21)));
   const streak = valueNoise(vec2(positionWorld.x.add(positionWorld.z).mul(1.3), positionWorld.y.mul(0.06)));
-  let col = base.mul(float(1.0).sub(uNoise).add(n.mul(uNoise.mul(1.2))).mul(mix(float(0.9), float(1.06), streak)));
-  if (courses > 0) {
-    const uCourses = uniform(courses);
-    const cv = positionWorld.y.div(uCourses).toVar();
-    const row = floor(cv);
-    const along = select(abs(normalWorld.x).greaterThan(abs(normalWorld.z)), positionWorld.z, positionWorld.x);
-    const cu = along.div(uCourses.mul(2.3)).add(row.mul(0.5)).toVar();
-    const joint = filteredPulse(cv, 0.0, 0.92, fwidth(cv)).mul(filteredPulse(cu, 0.0, 0.965, fwidth(cu)));
-    col = col.mul(mix(float(0.7), float(1.0), joint)).mul(hash12(vec2(floor(cu), row)).mul(0.16).add(0.92));
-  }
+  const plain = base.mul(float(1.0).sub(uNoise).add(n.mul(uNoise.mul(1.2))).mul(mix(float(0.9), float(1.06), streak)));
+  const uCourses = uniform(courses || 1); // any block height where there is no coursing: uCoursed mixes it away
+  const uCoursed = uniform(courses > 0 ? 1 : 0);
+  const cv = positionWorld.y.div(uCourses).toVar();
+  const row = floor(cv);
+  const along = select(abs(normalWorld.x).greaterThan(abs(normalWorld.z)), positionWorld.z, positionWorld.x);
+  const cu = along.div(uCourses.mul(2.3)).add(row.mul(0.5)).toVar();
+  const joint = filteredPulse(cv, 0.0, 0.92, fwidth(cv)).mul(filteredPulse(cu, 0.0, 0.965, fwidth(cu)));
+  const coursing = mix(float(0.7), float(1.0), joint).mul(hash12(vec2(floor(cu), row)).mul(0.16).add(0.92));
+  const col = plain.mul(mix(float(1.0), coursing, uCoursed));
   mat.colorNode = col;
-  if (flood > 0) mat.emissiveNode = col.mul(vec3(1.0, 0.86, 0.68)).mul(nightFactorNode().mul(uniform(flood)));
+  mat.emissiveNode = col.mul(vec3(1.0, 0.86, 0.68)).mul(nightFactorNode().mul(uniform(flood)));
   return mat;
 }
 

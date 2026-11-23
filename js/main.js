@@ -132,6 +132,13 @@ async function initApp() {
 
   await showLoadingStage('Placing trees, streetlights and street furniture...', 'streetDetails');
   const streetDetails = buildStreetDetails(scene, allColliders);
+  // Everything lit in Manhattan receives shadows, so that a material compiles one shader instead of one per
+  // receiveShadow value of the meshes it is on (the boroughs, beyond the shadow map, all go without)
+  for (const name of ['ManhattanCityGrid', 'ManhattanLandmarks', 'ManhattanStreetDetails']) {
+    scene.getObjectByName(name).traverse((o) => {
+      if (o.isMesh) o.receiveShadow = true;
+    });
+  }
   markInit('streetDetails');
   await showLoadingStage('Creating traffic and pedestrian routes...', 'traffic');
   // Buildings turned along non-grid streets have oriented colliders whose world bounds reach past their lots: they stay
