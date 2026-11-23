@@ -298,6 +298,7 @@ async function initApp() {
   ssrNode.mirrorBias.value = 0.7;
   ssrNode.maxDistance.value = 150;
   ssrNode.thickness.value = 0;
+  ssrNode.cameraRayThreshold.value = 1;
 
   // Temporal accumulation: ray reuse filters over space, so there is no spatial denoiser
   const ssrAccumulated = temporalReproject(ssrNode.getTextureNode(), lowDepth, lowNormal, downsample.getTextureNode('velocity'), camera, {
@@ -315,8 +316,9 @@ async function initApp() {
   // pass returns both the light of the directions the screen occludes and how much of the hemisphere stays open
   // (its AO), so there is no separate AO pass.
   const giPass = ssgi(previousBeauty, lowDepth, lowSceneNormal, camera);
-  giPass.sliceCount.value = 2;
-  giPass.stepCount.value = 8;
+  giPass.sliceCount.value = 4;
+  giPass.stepCount.value = 32;
+  giPass.radius.value = 32;
   const giNode = giPass.getGINode();
   const aoNode = giPass.getAONode();
   // RGB is the bounced light, alpha the AO. A few samples per pixel are far too sparse on their own, so they are
@@ -481,7 +483,7 @@ async function initApp() {
     giGui.add(giPass.aoIntensity, 'value', 0, 4, 0.01).name('AO intensity');
     giGui.add(giPass.sliceCount, 'value', 1, 4, 1).name('Slices');
     giGui.add(giPass.stepCount, 'value', 1, 32, 1).name('Steps');
-    giGui.add(giPass.radius, 'value', 1, 25, 0.1).name('Radius');
+    giGui.add(giPass.radius, 'value', 1, 50, 0.1).name('Radius');
     giGui.add(giPass.expFactor, 'value', 1, 3, 0.01).name('Exp factor');
     giGui.add(giPass.thickness, 'value', 0.01, 10, 0.01).name('Thickness');
     giGui.add(giPass.backfaceLighting, 'value', 0, 1, 0.01).name('Backface lighting');
