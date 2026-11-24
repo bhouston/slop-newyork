@@ -77,7 +77,10 @@ const cityUniforms = {
   uSkySunDir: uniform(new THREE.Vector3(-0.66, 0.34, -0.67).normalize()),
   uInteriorGlow: uniform(0.78),
   uRoadWetness: uniform(0.38),
-  uCanyonBounce: uniform(0.52)
+  uCanyonBounce: uniform(0.52),
+  // 1: the canyon AO below darkens the materials. 0 where the sky occlusion of the height map does it instead
+  // (js/sky-occlusion.js, in the main view); the hero probe's renders have no such pass and keep the canyon AO
+  uCanyonAO: uniform(1)
 };
 
 // Deterministic 2D -> [0, 1) hash: fract(sin(dot(p, k)) * 43758.5) on the input wrapped (exactly) into [0, 1024), so
@@ -236,8 +239,7 @@ const distantWindowLight = Fn(([grid, fw, probability, seed, lod]) => {
  * Models how Manhattan street canyons occlude overhead sky irradiance near the street floor (y = 0..65m),
  * while opening up in Central Park and on upper tower shafts.
  */
-const canyonSkyAONode = Fn(() => {
-  const wp = positionWorld;
+const canyonSkyAO = (wp) => {
   // Open sky inside Central Park (city-config.js CENTRAL_PARK_BOUNDS, 5th Ave to Central Park West, 59th to 110th St)
   const cp = CENTRAL_PARK_BOUNDS;
   const inParkX = smoothstep(cp.minX - 10.0, cp.minX + 20.0, wp.x).mul(float(1.0).sub(smoothstep(cp.maxX - 20.0, cp.maxX + 10.0, wp.x)));
@@ -248,7 +250,8 @@ const canyonSkyAONode = Fn(() => {
   const streetCrevice = smoothstep(0.0, 7.5, wp.y).mul(0.22).add(0.78);
   const canyonAO = mix(float(0.44), float(1.0), heightOpenness).mul(streetCrevice);
   return mix(canyonAO, float(1.0), inPark);
-});
+};
+const canyonSkyAONode = Fn(() => mix(float(1.0), canyonSkyAO(positionWorld), cityUniforms.uCanyonAO));
 
 // Material caches to prevent duplicate WebGPU WGSL shader compilation across blocks & landmarks
 const _curtainWallCache = new Map();
@@ -575,9 +578,11 @@ function getStorefrontSignTexture() {
   return _storefrontSignTexture;
 }
 
-// Shop windows are clear plate glass: a dielectric mirror in front of the room, which is emitted through it.
+// Shop windows are two layers of one surface, like the puddles on the asphalt: the room, a matte base that is lit as
+// any other surface (the sun, the shadows, SSGI, the environment) and emits the light of its lamps, under a clearcoat,
+// the plate glass, whose sharp reflections SSR answers.
 const STOREFRONT_GLASS_ROUGHNESS = 0.03; // sharp highlights and reflections
-const STOREFRONT_DAYLIGHT = 0.3; // how much of the sky's light reaches the room behind the glass
+const STOREFRONT_DAYLIGHT = 0.5; // the share of the light that arrives at the pane which lights the room behind it
 
 // Shops span several upstairs bays; every material output shares their glazing and door layout.
 function createStorefront(facade, seed, local) {
@@ -619,9 +624,9 @@ function createStorefront(facade, seed, local) {
   })().toVar();
   const frame = mix(mix(paint, color(0x92958d), metal), color(0xe0d7bb), signInk);
 
-  // The room as it is seen through the pane, as radiance: clear glass has no colour of its own
+  // The room as it is seen through the pane in RGB, and how much of the light of its lamps it emits in alpha
   const interior = Fn(() => {
-    const result = vec3(0).toVar();
+    const result = vec4(0).toVar();
     If(mask.greaterThan(0.001), () => {
       const light = mix(color(0xffd49a), color(0xe0edee), step(0.58, choice));
       const room = color(0x343330).toVar();
@@ -672,11 +677,10 @@ function createStorefront(facade, seed, local) {
       });
       const view = normalize(cameraPosition.sub(positionWorld));
       const fresnel = pow(clamp(float(1).sub(abs(dot(view, facadeWorldNormal))), 0, 1), 2);
-      // Lit by its own lamps and by the daylight that enters; less of it is seen at grazing angles, where the pane
-      // reflects the street instead (the material's specular lobe: the sun, SSR and the environment)
+      // The lamps are seen less at grazing angles, where the pane reflects the street instead; the coat attenuates
+      // the light the room reflects by itself
       const lamps = lit.mul(float(0.55).add(fixture.mul(2.2))).mul(cityUniforms.uInteriorGlow);
-      const seen = mix(room.mul(light).mul(mix(0.35, 0.95, lit)), light, fixture.mul(lit));
-      result.assign(seen.mul(cityUniforms.uSkyHorizonColor.mul(STOREFRONT_DAYLIGHT).add(lamps)).mul(float(1).sub(fresnel.mul(0.8))));
+      result.assign(vec4(mix(room.mul(light).mul(mix(0.35, 0.95, lit)), light, fixture.mul(lit)), lamps.mul(float(1).sub(fresnel.mul(0.8)))));
     });
     return result;
   })().toVar();
@@ -684,9 +688,9 @@ function createStorefront(facade, seed, local) {
   return {
     mask,
     glazing,
-    color: frame.mul(float(1).sub(glazing)),
-    emissive: interior.mul(glazing).add(color(0xe0d7bb).mul(signInk).mul(lit).mul(0.12).mul(cityUniforms.uInteriorGlow)),
-    roughness: mix(float(0.58), STOREFRONT_GLASS_ROUGHNESS, glazing),
+    color: mix(frame, interior.rgb.mul(STOREFRONT_DAYLIGHT), glazing),
+    emissive: interior.rgb.mul(interior.a).mul(glazing).add(color(0xe0d7bb).mul(signInk).mul(lit).mul(0.12).mul(cityUniforms.uInteriorGlow)),
+    roughness: mix(float(0.58), 1, glazing), // the room under the glass is matte
     relief: float(1).sub(glazing).mul(0.008).add(handle.mul(0.004))
   };
 }
@@ -768,7 +772,7 @@ function createCurtainWallMaterial(opts = {}) {
     return _curtainWallCache.get(cacheKey);
   }
 
-  const mat = new THREE.MeshStandardNodeMaterial({
+  const mat = new THREE.MeshPhysicalNodeMaterial({
     metalness: 0.72,
     roughness: 0.12
   });
@@ -882,7 +886,10 @@ function createCurtainWallMaterial(opts = {}) {
     const surface = mix(mix(glassOrFrame, float(0.36), coping), storefront.roughness, storefront.mask);
     return mix(surface, entrance.roughness, entrance.mask);
   })();
-  mat.metalnessNode = mix(float(0.72), 0, storefront.mask.mul(storefront.glazing)); // shop glass is a dielectric
+  // The shop glass is a clearcoat over the room, neither of them a metal
+  mat.clearcoatNode = storefront.mask.mul(storefront.glazing);
+  mat.clearcoatRoughnessNode = float(STOREFRONT_GLASS_ROUGHNESS);
+  mat.metalnessNode = mix(float(0.72), 0, mat.clearcoatNode);
 
   // Hardware derivative bumpNormal for raised curtain-wall mullions & spandrel channels (ramps >= 2px, see pre-war)
   mat.normalNode = Fn(() => {
@@ -955,7 +962,7 @@ function createPreWarBuildingMaterial(opts = {}) {
     return _preWarCache.get(cacheKey);
   }
 
-  const mat = new THREE.MeshStandardNodeMaterial({
+  const mat = new THREE.MeshPhysicalNodeMaterial({
     metalness: 0.06,
     roughness: 0.76
   });
@@ -1192,7 +1199,10 @@ function createPreWarBuildingMaterial(opts = {}) {
     const surface = mix(mix(float(0.78).add(stoneGrain), glassRough, isWindow), storefront.roughness, storefront.mask);
     return mix(surface, entrance.roughness, entrance.mask);
   })();
-  mat.metalnessNode = mix(float(0.06), 0, storefront.mask.mul(storefront.glazing)); // shop glass is a dielectric
+  // The shop glass is a clearcoat over the room, neither of them a metal
+  mat.clearcoatNode = storefront.mask.mul(storefront.glazing);
+  mat.clearcoatRoughnessNode = float(STOREFRONT_GLASS_ROUGHNESS);
+  mat.metalnessNode = mix(float(0.06), 0, mat.clearcoatNode);
 
   // Hardware derivative bumpNormal for domed brickwork, stone courses, recessed windows & AC louvers. Edges ramp over
   // >= 2px and the fine brick & louver relief fades before it shrinks to pixels: sharper height steps turn into
@@ -3515,6 +3525,7 @@ function createCarFlareMaterial() {
 
 export {
   cityUniforms,
+  canyonSkyAO,
   WALL_KINDS,
   filteredPulse,
   createCurtainWallMaterial,

@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import { Fn, output, pass, mrt, builtinIndirectContext, clearcoat, sample, packNormalToOctahedral, unpackOctahedralToNormal, vec2, vec3, vec4, velocity, rtt, screenUV, uniform, getViewPosition, cubeTexture } from 'three/tsl';
+import { Fn, output, pass, mrt, builtinIndirectContext, clearcoat, sample, packNormalToOctahedral, unpackOctahedralToNormal, vec2, vec3, vec4, velocity, rtt, screenUV, screenSize, uniform, getViewPosition, cubeTexture } from 'three/tsl';
 import { ssr } from 'three/addons/tsl/display/SSRNode.js';
 import { depthAwareDownsample } from 'three/addons/tsl/display/DepthAwareDownsampleNode.js';
 import { jointBilateralUpsample } from 'three/addons/tsl/display/JointBilateralUpsample.js';
@@ -27,6 +27,8 @@ import { TouchControls } from './touch-controls.js';
 import { GamepadControls } from './gamepad-controls.js';
 import { CameraSystem, CAMERA_PRESETS } from './cameras.js';
 import { LightingSystem } from './lighting.js';
+import { createSkyOcclusion } from './sky-occlusion.js';
+import { canyonSkyAO, cityUniforms } from './tsl-materials.js';
 import { NYCMapSystem } from './nyc-map.js';
 import { setupSceneCulling, updateSceneCulling } from './scene-culling.js';
 import { CityAudioSystem } from './audio-system.js';
@@ -131,12 +133,14 @@ async function initApp() {
   const boroughs = buildBoroughs(scene, { sidewalks: cityGrid.sidewalks });
   markInit('boroughs');
   await showLoadingStage('Building landmarks...', 'landmarks');
-  const { colliders: landmarkColliders } = buildLandmarks(scene);
+  const { group: landmarks, colliders: landmarkColliders } = buildLandmarks(scene);
   markInit('landmarks');
   await showLoadingStage('Generating building footprints and facades...', 'blocks');
   const cityBlocks = buildCityBlocks(scene, landmarkColliders);
   markInit('blocks');
   const allColliders = [...landmarkColliders, ...cityBlocks.colliders, ...boroughs.colliders, ...(cityGrid.colliders || [])];
+  // The landmarks are drawn into the height map as they are: their colliders are boxes wider than their towers
+  const skyOcclusion = createSkyOcclusion(allColliders.filter((c) => !landmarkColliders.includes(c)), landmarks);
 
   await showLoadingStage('Placing trees, streetlights and street furniture...', 'streetDetails');
   const streetDetails = buildStreetDetails(scene, allColliders);
@@ -290,9 +294,13 @@ async function initApp() {
   const lowMetalRough = downsample.getTextureNode('metalrough');
 
   const lowSceneNormal = sample((uv) => normalDecode(lowNormal.sample(uv)));
-  // Joint bilateral upsample to the scene's resolution, once per pixel rather than per shaded fragment
+  // Joint bilateral upsample to the scene's resolution, once per pixel rather than per shaded fragment. The tolerance
+  // is the relative depth difference at which a texel is rejected: at UPSAMPLE_BILINEAR none is, which leaves the
+  // plain bilinear weights (for comparison, in the inspector).
+  const UPSAMPLE_JOINT = 0.005, UPSAMPLE_BILINEAR = 1e9;
+  const upsampleTolerance = uniform(UPSAMPLE_JOINT);
   const upsample = (node, options) => {
-    const target = rtt(jointBilateralUpsample(node, lowDepth, prePassDepth, camera, options).sample(screenUV));
+    const target = rtt(jointBilateralUpsample(node, lowDepth, prePassDepth, camera, { depthTolerance: upsampleTolerance, ...options }).sample(screenUV));
     sceneResolutionTargets.push(target);
     return target.sample(screenUV);
   };
@@ -347,6 +355,19 @@ async function initApp() {
   });
   const gi = upsample(giAccumulated.getTextureNode());
 
+  // Sky occlusion: the share of the sky each pixel sees over the skyline around it, from the height map of the city
+  // (js/sky-occlusion.js), at half resolution like SSGI. What the buildings hide is black for now (no bounce).
+  // The position is rebuilt from the depth, which gets coarse far away: the height bias grows with the distance.
+  const cameraWorld = uniform(camera.matrixWorld);
+  const lowViewPosition = getViewPosition(screenUV, lowDepth.sample(screenUV).r, uniform(camera.projectionMatrixInverse));
+  const skyVisibilityLow = rtt(vec4(skyOcclusion.visibility(
+    cameraWorld.mul(vec4(lowViewPosition, 1)).xyz,
+    cameraWorld.mul(vec4(normalDecode(lowNormal.sample(screenUV)), 0)).xyz.normalize(),
+    lowViewPosition.z.negate().mul(0.002)
+  )), null, null, { resolutionScale: 0.5 });
+  const skyVisibility = upsample(skyVisibilityLow).r;
+  const skyIntensity = uniform(1); // 0: the canyon AO of the materials instead (the look before the height map)
+
   // Hero reflection probe: a cube map of the surroundings captured at the player's vehicle, without the vehicle. It
   // answers what the screen can't (the street behind the camera, in the paintwork) for the vehicle alone, where it
   // stands in for the sky-only environment. The road and the cars next to it are not at the probe's centre.
@@ -366,8 +387,10 @@ async function initApp() {
   const heroSpecular = ({ direction, roughness }) => vec4(cubeTexture(heroTarget.texture, direction).level(roughness.mul(heroMips)).rgb.mul(heroCoverage), heroCoverage);
   const heroDiffuse = ({ normal }) => vec4(cubeTexture(heroTarget.texture, normal).level(heroMips - 1).rgb.mul(Math.PI).mul(heroCoverage), heroCoverage);
   let heroFace = -1;
-  // One face per frame (a face is one more draw of the city), after the frame is rendered so its shadow maps are not
-  // drawn without the vehicle. All six on the first call.
+  // One face per frame (a face is one more draw of the city), after the frame is rendered. All six on the first call.
+  // The probe is lit with the sun's shadow maps of the frame: three.js would fit and draw the cascades again for the
+  // camera of the face (two more draws of the city's casters). The frame's cascades are fitted to the view, so the
+  // probe's shadows are right around the vehicle and in front of the camera, and not to be trusted behind it.
   function updateHeroProbe() {
     const entity = controllerManager.getActiveEntity();
     heroMesh = entity?.mesh ?? null;
@@ -376,6 +399,10 @@ async function initApp() {
     heroCamera.updateMatrixWorld();
     const visible = entity.mesh.visible;
     entity.mesh.visible = false;
+    cityUniforms.uCanyonAO.value = 1; // no sky occlusion pass here (the loop sets it back for the main view)
+    const sunShadow = lightingSystem.sunLight.shadow;
+    const autoUpdate = sunShadow.autoUpdate;
+    sunShadow.autoUpdate = false;
     if (heroFace < 0) {
       heroCamera.update(renderer, scene);
     } else {
@@ -385,6 +412,7 @@ async function initApp() {
     }
     heroFace = (heroFace + 1) % 6;
     entity.mesh.visible = visible;
+    sunShadow.autoUpdate = autoUpdate;
   }
 
   // The materials read all of it through their BRDF, each source filling what the one before left uncovered.
@@ -414,7 +442,9 @@ async function initApp() {
   const giIntensity = uniform(1);
   beautyPass.contextNode = builtinIndirectContext({
     specular: [opaqueFragmentSource(ssrNode.getSpecularSource(reflection).mul(ssrIntensity)), heroSpecular, noteLighting],
-    diffuse: [opaqueFragmentSource(giPass.getDiffuseSource(gi.rgb, gi.a).mul(giIntensity)), heroDiffuse]
+    // the sky occlusion gives no light, it only covers the part of the environment the buildings hide
+    diffuse: [opaqueFragmentSource(giPass.getDiffuseSource(gi.rgb, gi.a).mul(giIntensity)), heroDiffuse,
+      opaqueFragmentSource(vec4(0, 0, 0, skyVisibility.oneMinus().mul(skyIntensity)))]
   });
 
   // FSR1 needs an anti-aliased source: retain TRAA at scene resolution in both modes.
@@ -465,6 +495,21 @@ async function initApp() {
     if (!shown) inspector.profiler.setActiveTab(inspector[tab].id); // regardless of the saved Inspector tab
     for (const [name, other] of Object.entries(inspectorButtons)) if (other) other.setAttribute('aria-pressed', String(!shown && name === tab));
   });
+  // profilePasses(seconds) in the console, or tools/profile-passes.mjs: where the time of a frame goes, by pass
+  // (js/pass-profiler.js). The scene's passes are named by what they draw to.
+  // It is there once the city is on screen.
+  const profilePasses = async (seconds = 5) => {
+    const { PassProfiler, passLabel, formatPassProfile } = await import('./pass-profiler.js');
+    const targets = new Map([[prePass.renderTarget, 'Pre-pass'], [beautyPass.renderTarget, 'Beauty pass'], [heroTarget, 'Hero probe']]);
+    const profiler = new PassProfiler({ label: (stats) => targets.get(stats.renderTarget) ?? passLabel(stats) });
+    const previous = renderer.inspector;
+    renderer.inspector = profiler;
+    const report = await profiler.measure(seconds);
+    renderer.inspector = inspector ?? previous; // the Inspector, if it was opened meanwhile
+    report.text = formatPassProfile(report);
+    console.log(report.text);
+    return report;
+  };
   const show = (node) => vec4(vec3(node), 1);
   // The inspector's two indirect light outputs, set up when first asked for: the beauty pass writes them to
   // attachments of their own, which recompiles its shaders (a pause).
@@ -482,6 +527,11 @@ async function initApp() {
   }
   function addInspectorParameters() {
     const viewZ = getViewPosition(screenUV, prePassDepth.sample(screenUV).r, uniform(camera.projectionMatrixInverse)).z;
+    // The world position and normal of the pixel, for the sky occlusion outputs (the sky itself shows as open)
+    const viewPosition = getViewPosition(screenUV, prePassDepth.sample(screenUV).r, uniform(camera.projectionMatrixInverse));
+    const worldPosition = cameraWorld.mul(vec4(viewPosition, 1)).xyz;
+    const worldNormal = cameraWorld.mul(vec4(normalDecode(prePassNormal.sample(screenUV)), 0)).xyz.normalize();
+    const isSky = viewZ.lessThan(-50000);
     const outputs = {
       'Final': colorGrade.outputNode,
       'Beauty (before anti-aliasing)': show(beautyPass.getTextureNode('output').rgb),
@@ -501,6 +551,11 @@ async function initApp() {
       'SSGI light accumulated': show(gi.rgb),
       'SSGI AO': show(gi.a),
       'SSGI coverage': show(gi.a.oneMinus()),
+      'Sky visibility (in use: half res, upsampled)': show(skyVisibility),
+      'Sky visibility (height map)': show(isSky.select(1, skyOcclusion.visibility(worldPosition, worldNormal))),
+      'Sky visibility (brute force reference, slow)': show(isSky.select(1, skyOcclusion.visibilityReference(worldPosition, worldNormal))),
+      'Canyon AO (height only)': show(isSky.select(1, canyonSkyAO(worldPosition))),
+      'Height map (1 km around the camera, white = 300 m)': show(skyOcclusion.topDown(screenUV, screenSize.x.div(screenSize.y), cameraWorld.mul(vec4(0, 0, 0, 1)))),
       'Indirect Specular': null, // these two are set when first shown, see below
       'Indirect Diffuse': null,
       // equirectangular: up is +y, the centre of the image looks along -z (north)
@@ -529,7 +584,9 @@ async function initApp() {
       .onChange(() => updateRendering('method', methodControl));
     const samplingControl = renderingGui.add(rendering, 'historySampling', { 'Catmull-Rom': 'catmull-rom', 'Bilinear': 'linear' }).name('TRAA history interpolation')
       .onChange(() => updateRendering('historySampling', samplingControl));
-    inspector.createParameters('Output').add(state, 'output', Object.keys(outputs)).name('Show').onChange(showOutput);
+    renderingGui.add(upsampleTolerance, 'value', { 'Joint bilateral': UPSAMPLE_JOINT, 'Bilinear': UPSAMPLE_BILINEAR }).name('SSR / SSGI upsampling');
+    const outputControl = inspector.createParameters('Output').add(state, 'output', Object.keys(outputs)).name('Show').onChange(showOutput);
+    window.showOutput = (name) => outputControl.setValue(name); // for scripted screenshots
     const ssrGui = inspector.createParameters('SSR');
     ssrGui.add(ssrIntensity, 'value', 0, 1, 0.01).name('Intensity');
     ssrGui.add(ssrNode.maxDistance, 'value', 1, 500, 1).name('Max distance (m)');
@@ -557,12 +614,15 @@ async function initApp() {
     giGui.add(giPass, 'useTemporalFiltering').name('Per-frame noise');
     giGui.add(giDenoised.luminancePhi, 'value', 0, 10, 0.1).name('Blur strength');
     giGui.add(giAccumulated.maxFrames, 'value', 1, 64, 1).name('History frames');
+    inspector.createParameters('Sky occlusion').add(skyIntensity, 'value', { 'Height map': 1, 'Canyon AO (before)': 0 }).name('From');
+    window.skyIntensity = skyIntensity; // for scripted screenshots
     const heroGui = inspector.createParameters('Hero probe');
     heroGui.add(heroIntensity, 'value', 0, 1, 0.01).name('Coverage (0 = off)');
   }
 
   // The capture button saves the lighting breakdown of the current view as an animated WebP: the beauty, its two
-  // indirect lights, then the beauty again with the hero probe, SSGI and SSR switched off one after the other. The
+  // indirect lights, then the beauty again with the hero probe, SSGI, SSR and the sky occlusion of the height map
+  // switched off one after the other. The
   // world stands still meanwhile (see the loop), each frame is rendered at 1920 x 1080 and labelled, and the file is
   // assembled in the page (no server).
   const CAPTURE_WIDTH = 1920, CAPTURE_HEIGHT = 1080;
@@ -584,9 +644,11 @@ async function initApp() {
       ['Beauty', () => showOutput(colorGrade.outputNode)],
       ['Hero probe off', () => { heroIntensity.value = 0; }],
       ['Hero probe and SSGI off', () => { giIntensity.value = 0; }],
-      ['Hero probe, SSGI and SSR off', () => { ssrIntensity.value = 0; }]
+      ['Hero probe, SSGI and SSR off', () => { ssrIntensity.value = 0; }],
+      // the materials' canyon AO takes its place, as before the height map
+      ['Hero probe, SSGI, SSR and sky occlusion height map off', () => { skyIntensity.value = 0; }]
     ];
-    const before = { output: renderPipeline.outputNode, hero: heroIntensity.value, gi: giIntensity.value, ssr: ssrIntensity.value };
+    const before = { output: renderPipeline.outputNode, hero: heroIntensity.value, gi: giIntensity.value, ssr: ssrIntensity.value, sky: skyIntensity.value };
     const title = captureButton.title;
     const canvas = document.createElement('canvas');
     canvas.width = CAPTURE_WIDTH;
@@ -621,6 +683,7 @@ async function initApp() {
       heroIntensity.value = before.hero;
       giIntensity.value = before.gi;
       ssrIntensity.value = before.ssr;
+      skyIntensity.value = before.sky;
       showOutput(before.output);
       renderer.setSize(window.innerWidth, window.innerHeight);
       cameraSystem.onResize(window.innerWidth, window.innerHeight);
@@ -1131,6 +1194,7 @@ async function initApp() {
     // Traffic collisions can move the player after controller updates; finalize moving hierarchies here.
     for (const root of dynamicRoots) root.updateMatrixWorld();
 
+    cityUniforms.uCanyonAO.value = 1 - skyIntensity.value; // the sky occlusion replaces the canyon AO in the main view
     // Render frame via TSL RenderPipeline (SSR + Bloom)
     if (!warmedUp) {
       // First frame = pipeline warm-up behind the loading screen, for what precompileShaders() can't reach (the shadow
@@ -1167,6 +1231,7 @@ async function initApp() {
         setLoadingProgress(1);
         if (loadingOverlay) loadingOverlay.classList.add('hidden');
         audioSystem.ready = true;
+        window.profilePasses = profilePasses;
       });
     }
 
