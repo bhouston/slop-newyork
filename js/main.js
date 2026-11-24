@@ -356,7 +356,9 @@ async function initApp() {
   const gi = upsample(giAccumulated.getTextureNode());
 
   // Sky occlusion: the share of the sky each pixel sees over the skyline around it, from the height map of the city
-  // (js/sky-occlusion.js), at half resolution like SSGI. What the buildings hide is black for now (no bounce).
+  // (js/sky-occlusion.js), at half resolution like SSGI. The part of the sky the buildings hide shows the buildings
+  // instead: it is filled with the light they bounce, which is the ground colour of the time of day's hemisphere
+  // light scaled by its canyon bounce (set in the loop), the same from every direction.
   // The position is rebuilt from the depth, which gets coarse far away: the height bias grows with the distance.
   const cameraWorld = uniform(camera.matrixWorld);
   const lowViewPosition = getViewPosition(screenUV, lowDepth.sample(screenUV).r, uniform(camera.projectionMatrixInverse));
@@ -367,6 +369,16 @@ async function initApp() {
   )), null, null, { resolutionScale: 0.5 });
   const skyVisibility = upsample(skyVisibilityLow).r;
   const skyIntensity = uniform(1); // 0: the canyon AO of the materials instead (the look before the height map)
+  const skyBounce = uniform(new THREE.Color()); // the irradiance of a surface that sees only buildings
+  const skyBounceGain = uniform(1); // 0: black
+  const skyCoverage = skyVisibility.oneMinus().mul(skyIntensity);
+  // Before every render of the main view (the hero probe's renders switch the canyon AO back on): the sky occlusion
+  // replaces the canyon AO of the materials, and the bounce follows the time of day
+  function syncSkyOcclusion() {
+    cityUniforms.uCanyonAO.value = 1 - skyIntensity.value;
+    const hemiLight = lightingSystem.hemiLight;
+    skyBounce.value.copy(hemiLight.groundColor).multiplyScalar(hemiLight.intensity * cityUniforms.uCanyonBounce.value);
+  }
 
   // Hero reflection probe: a cube map of the surroundings captured at the player's vehicle, without the vehicle. It
   // answers what the screen can't (the street behind the camera, in the paintwork) for the vehicle alone, where it
@@ -442,9 +454,9 @@ async function initApp() {
   const giIntensity = uniform(1);
   beautyPass.contextNode = builtinIndirectContext({
     specular: [opaqueFragmentSource(ssrNode.getSpecularSource(reflection).mul(ssrIntensity)), heroSpecular, noteLighting],
-    // the sky occlusion gives no light, it only covers the part of the environment the buildings hide
+    // the sky occlusion covers the part of the environment the buildings hide, with the light they bounce
     diffuse: [opaqueFragmentSource(giPass.getDiffuseSource(gi.rgb, gi.a).mul(giIntensity)), heroDiffuse,
-      opaqueFragmentSource(vec4(0, 0, 0, skyVisibility.oneMinus().mul(skyIntensity)))]
+      opaqueFragmentSource(vec4(skyBounce.mul(skyBounceGain).mul(skyCoverage), skyCoverage))]
   });
 
   // FSR1 needs an anti-aliased source: retain TRAA at scene resolution in both modes.
@@ -472,6 +484,7 @@ async function initApp() {
     const scale = rendering.method === fsrMethod ? 0.75 : 1;
     for (const target of [prePass, beautyPass, previousBeauty, ...sceneResolutionTargets]) target.setResolutionScale(scale);
     giInput.setResolutionScale(0.5 * scale);
+    skyVisibilityLow.setResolutionScale(0.5 * scale);
     selectedVariant().antialiased.reset(); // scene and temporal histories resize on their next render
   }
   setRenderingResolution();
@@ -614,8 +627,10 @@ async function initApp() {
     giGui.add(giPass, 'useTemporalFiltering').name('Per-frame noise');
     giGui.add(giDenoised.luminancePhi, 'value', 0, 10, 0.1).name('Blur strength');
     giGui.add(giAccumulated.maxFrames, 'value', 1, 64, 1).name('History frames');
-    inspector.createParameters('Sky occlusion').add(skyIntensity, 'value', { 'Height map': 1, 'Canyon AO (before)': 0 }).name('From');
-    window.skyIntensity = skyIntensity; // for scripted screenshots
+    const skyGui = inspector.createParameters('Sky occlusion');
+    skyGui.add(skyIntensity, 'value', { 'Height map': 1, 'Canyon AO (before)': 0 }).name('From');
+    skyGui.add(skyBounceGain, 'value', 0, 3, 0.01).name('Bounce (0 = black)');
+    Object.assign(window, { skyIntensity, skyBounceGain }); // for scripted screenshots
     const heroGui = inspector.createParameters('Hero probe');
     heroGui.add(heroIntensity, 'value', 0, 1, 0.01).name('Coverage (0 = off)');
   }
@@ -1158,6 +1173,7 @@ async function initApp() {
     const dt = Math.min(Math.max(rawDt, 0.001), 0.05);
     // A capture holds the world and the camera still, so its frames differ in their lighting alone
     if (capturing) {
+      syncSkyOcclusion();
       renderPipeline.render();
       if (afterCaptureFrame) afterCaptureFrame();
       return;
@@ -1194,7 +1210,7 @@ async function initApp() {
     // Traffic collisions can move the player after controller updates; finalize moving hierarchies here.
     for (const root of dynamicRoots) root.updateMatrixWorld();
 
-    cityUniforms.uCanyonAO.value = 1 - skyIntensity.value; // the sky occlusion replaces the canyon AO in the main view
+    syncSkyOcclusion();
     // Render frame via TSL RenderPipeline (SSR + Bloom)
     if (!warmedUp) {
       // First frame = pipeline warm-up behind the loading screen, for what precompileShaders() can't reach (the shadow
