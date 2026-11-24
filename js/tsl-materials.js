@@ -7,6 +7,7 @@ import {
   vec4,
   color,
   uniform,
+  uniformArray,
   attribute,
   varying,
   positionGeometry,
@@ -254,6 +255,16 @@ const canyonSkyAO = (wp) => {
 const canyonSkyAONode = Fn(() => mix(float(1.0), canyonSkyAO(positionWorld), cityUniforms.uCanyonAO));
 
 // Material caches to prevent duplicate WebGPU WGSL shader compilation across blocks & landmarks
+// A facade style's parameter. With `styles` (a list of option sets sharing one material), it is read from a table by
+// the vertex's 'facadeStyle' attribute, so buildings of several styles merge into one mesh and one draw; otherwise
+// it is a uniform of the material.
+function styleParam(styles, key, fallback, isColor = false) {
+  const value = (v) => isColor ? new THREE.Color(v) : v;
+  if (!styles) return uniform(value(fallback));
+  return uniformArray(styles.map((style) => value(style[key] ?? fallback)), isColor ? 'color' : 'float')
+    .element(attribute('facadeStyle', 'float').add(0.5).toInt());
+}
+
 const _curtainWallCache = new Map();
 const _preWarCache = new Map();
 
@@ -764,10 +775,11 @@ function createCurtainWallMaterial(opts = {}) {
     reflectivity = 0.92,
     seed = 1.0,
     boxLocal = false,
-    footprintLocal = false
+    footprintLocal = false,
+    styles = null // see styleParam()
   } = opts;
 
-  const cacheKey = `${glassTint}_${frameTint}_${windowWidth}_${floorHeight}_${litProbability}_${warmth}_${reflectivity}_${seed}_${boxLocal}_${footprintLocal}`;
+  const cacheKey = `${glassTint}_${frameTint}_${windowWidth}_${floorHeight}_${litProbability}_${warmth}_${reflectivity}_${seed}_${boxLocal}_${footprintLocal}_${JSON.stringify(styles)}`;
   if (_curtainWallCache.has(cacheKey)) {
     return _curtainWallCache.get(cacheKey);
   }
@@ -778,14 +790,14 @@ function createCurtainWallMaterial(opts = {}) {
   });
 
   // The style's parameters are uniforms (not baked-in constants), so every curtain-wall style compiles to one shader
-  const cGlass = uniform(new THREE.Color(glassTint));
-  const cFrame = uniform(new THREE.Color(frameTint));
-  const uWindowWidth = uniform(windowWidth);
-  const uFloorHeight = uniform(floorHeight);
-  const uLitProbability = uniform(litProbability);
-  const uWarmth = uniform(warmth);
-  const uReflectivity = uniform(reflectivity);
-  const uSeed = uniform(seed);
+  const cGlass = styleParam(styles, 'glassTint', glassTint, true);
+  const cFrame = styleParam(styles, 'frameTint', frameTint, true);
+  const uWindowWidth = styleParam(styles, 'windowWidth', windowWidth);
+  const uFloorHeight = styleParam(styles, 'floorHeight', floorHeight);
+  const uLitProbability = styleParam(styles, 'litProbability', litProbability);
+  const uWarmth = styleParam(styles, 'warmth', warmth);
+  const uReflectivity = styleParam(styles, 'reflectivity', reflectivity);
+  const uSeed = styleParam(styles, 'seed', seed);
   const cCanyonBounce = color(0xe89c68);
 
   mat.aoNode = canyonSkyAONode();
@@ -954,10 +966,11 @@ function createPreWarBuildingMaterial(opts = {}) {
     seed = 42.0,
     boxLocal = false,
     footprintLocal = false,
-    cornerPier = 1.2 // solid masonry at both ends of every wall above the shopfronts (box-local mode)
+    cornerPier = 1.2, // solid masonry at both ends of every wall above the shopfronts (box-local mode)
+    styles = null // see styleParam()
   } = opts;
 
-  const cacheKey = `${stoneColor}_${trimColor}_${windowWidth}_${floorHeight}_${litProbability}_${warmth}_${crownGlowHeight}_${seed}_${boxLocal}_${footprintLocal}_${cornerPier}`;
+  const cacheKey = `${stoneColor}_${trimColor}_${windowWidth}_${floorHeight}_${litProbability}_${warmth}_${crownGlowHeight}_${seed}_${boxLocal}_${footprintLocal}_${cornerPier}_${JSON.stringify(styles)}`;
   if (_preWarCache.has(cacheKey)) {
     return _preWarCache.get(cacheKey);
   }
@@ -968,16 +981,16 @@ function createPreWarBuildingMaterial(opts = {}) {
   });
 
   // The style's parameters are uniforms (not baked-in constants), so every masonry style compiles to one shader
-  const cStone = uniform(new THREE.Color(stoneColor));
-  const cTrim = uniform(new THREE.Color(trimColor));
-  const cGlass = uniform(new THREE.Color(windowGlassColor));
-  const cCrown = uniform(new THREE.Color(crownGlowColor));
-  const uWindowWidth = uniform(windowWidth);
-  const uFloorHeight = uniform(floorHeight);
-  const uLitProbability = uniform(litProbability);
-  const uWarmth = uniform(warmth);
-  const uCrownGlowHeight = uniform(crownGlowHeight);
-  const uSeed = uniform(seed);
+  const cStone = styleParam(styles, 'stoneColor', stoneColor, true);
+  const cTrim = styleParam(styles, 'trimColor', trimColor, true);
+  const cGlass = styleParam(styles, 'windowGlassColor', windowGlassColor, true);
+  const cCrown = styleParam(styles, 'crownGlowColor', crownGlowColor, true);
+  const uWindowWidth = styleParam(styles, 'windowWidth', windowWidth);
+  const uFloorHeight = styleParam(styles, 'floorHeight', floorHeight);
+  const uLitProbability = styleParam(styles, 'litProbability', litProbability);
+  const uWarmth = styleParam(styles, 'warmth', warmth);
+  const uCrownGlowHeight = styleParam(styles, 'crownGlowHeight', crownGlowHeight);
+  const uSeed = styleParam(styles, 'seed', seed);
   const cSoot = color(0x4a4236);
   const cCanyonBounce = color(0xe89c68);
 

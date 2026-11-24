@@ -216,7 +216,15 @@ function buildCityBlocks(scene, landmarkColliders = []) {
       seed: 94.3
     }]
   ];
-  const materials = facades.map(([create, opts]) => create({ ...opts, footprintLocal: true }));
+  // One material per kind of facade (masonry, curtain wall): its styles are a table the shader reads by a vertex
+  // attribute, so a cell's buildings are one mesh per kind and not one per style
+  const families = [...new Set(facades.map(([create]) => create))].map((create) => {
+    const styles = facades.filter(([c]) => c === create).map(([, opts]) => opts);
+    return { create, material: create({ footprintLocal: true, styles }) };
+  });
+  // Per facade: its family, and its style's index in the family's table
+  const familyOf = facades.map(([create]) => families.findIndex((f) => f.create === create));
+  const styleOf = facades.map(([create], i) => facades.slice(0, i).filter(([c]) => c === create).length);
   const storeys = facades.map(([, opts]) => opts.floorHeight);
 
   const broadwayBillboards = [];
@@ -340,7 +348,8 @@ function buildCityBlocks(scene, landmarkColliders = []) {
     }
   }
 
-  const surveyedBuckets = materials.map(() => []);
+  const surveyedBuckets = families.map(() => []);
+  const styleCounts = facades.map(() => 0); // a building's seed is its number among the buildings of its style
   const detailsToPlace = [];
   for (const b of surveyedBuildings) {
     const seed = Math.round(b.cx * 31 + b.cz * 17);
@@ -351,8 +360,8 @@ function buildCityBlocks(scene, landmarkColliders = []) {
         : tone < 0.6 ? 2 : 4;
     // The survey has no building-use data; choose retail independently of facade style and roof details.
     const storefronts = b.height >= 6 && mulberry32(seed ^ 0x53544f52)() < 0.55;
-    const record = { ...b, tone, storefronts };
-    surveyedBuckets[mat].push(record);
+    const record = { ...b, tone, storefronts, style: styleOf[mat], seed: styleCounts[mat]++ * 29 };
+    surveyedBuckets[familyOf[mat]].push(record);
     const detail = {
       cx: b.cx, cz: b.cz, minX: b.minX, maxX: b.maxX, minZ: b.minZ, maxZ: b.maxZ,
       cornices: [], waterTowers: [], hvacUnits: [], fireEscapes: [], awnings: [], scaffoldSheds: [], footprints: []
@@ -377,7 +386,8 @@ function buildCityBlocks(scene, landmarkColliders = []) {
   }
   surveyedBuckets.forEach((items, i) => {
     if (!items.length) return;
-    group.add(createBuildingFootprints(materials[i], items, i < 2 ? b => nearbyReserves(b, 2) : undefined));
+    // Masonry buildings (the first family) blank their walls against taller neighbours
+    group.add(createBuildingFootprints(families[i].material, items, i === 0 ? b => nearbyReserves(b, 2) : undefined));
   });
 
   // Narrow empty lots become sitting areas with trees.

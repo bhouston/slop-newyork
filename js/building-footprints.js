@@ -27,8 +27,9 @@ function createBuildingFootprints(material, records, getNeighbours) {
     if (!(record.height > 0)) return;
     const key = Math.floor(record.cx / 1000) + ',' + Math.floor(record.cz / 1000);
     let cell = cells.get(key);
-    if (!cell) cells.set(key, (cell = { positions: [], normals: [], indices: [], boxes: [], walls: [] }));
+    if (!cell) cells.set(key, (cell = { positions: [], normals: [], indices: [], boxes: [], walls: [], styles: [] }));
     const height = record.height, top = height + 0.22;
+    const style = record.style ?? 0; // the building's row in the material's table of styles (tsl-materials.js)
     const seed = Math.floor(record.seed ?? index * 29) % 1000 + 0.1 + 0.8 * (record.tone ?? 0.5);
     const neighbours = getNeighbours && height <= 60 ? getNeighbours(record) : [];
 
@@ -59,6 +60,7 @@ function createBuildingFootprints(material, records, getNeighbours) {
             // Footprint walls use the box's unused depth for the exposed height above adjoining roofs.
             cell.boxes.push(width, height, exposedHeight, seed);
             cell.walls.push(reverse ? 1 - k % 2 : k % 2, k < 2 ? height : 0, kind);
+            cell.styles.push(style);
           }
           cell.indices.push(offset, offset + 1, offset + 2, offset + 2, offset + 1, offset + 3);
         }
@@ -70,6 +72,7 @@ function createBuildingFootprints(material, records, getNeighbours) {
         cell.normals.push(0, 1, 0);
         cell.boxes.push(1, height, height, seed);
         cell.walls.push(0, 0, WALL_KINDS.front);
+        cell.styles.push(style);
       }
       for (const [a, b, c] of triangles) cell.indices.push(offset + a, offset + c, offset + b);
     }
@@ -85,6 +88,7 @@ function createBuildingFootprints(material, records, getNeighbours) {
     geometry.setAttribute('normal', new THREE.Float32BufferAttribute(cell.normals, 3));
     geometry.setAttribute('box', new THREE.Float32BufferAttribute(cell.boxes, 4));
     geometry.setAttribute('facadeWall', new THREE.Float32BufferAttribute(cell.walls, 3));
+    geometry.setAttribute('facadeStyle', new THREE.Float32BufferAttribute(cell.styles, 1));
     geometry.setIndex(cell.indices);
     geometry.computeBoundingSphere();
     const mesh = new THREE.Mesh(geometry, material);

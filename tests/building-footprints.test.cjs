@@ -176,3 +176,12 @@ test('party-wall sign clearance uses the tallest neighbor and leaves courtyard w
   assert.equal(blankVertices, 4);
   for (let i = 16; i < 32; i++) assert.equal(attrs.facadeWall.array[i * 3 + 2], 2);
 });
+
+test('buildings of several styles share a cell mesh, each vertex carrying its style', () => {
+  const group = build([record(square(), { style: 0 }), record(square(20), { style: 2 }), record(square(40))]);
+  assert.equal(group.children.length, 1);
+  const { facadeStyle, position } = group.children[0].geometry.attributes;
+  assert.equal(facadeStyle.array.length, position.array.length / 3);
+  // 4 walls of 4 vertices and 4 roof vertices per building
+  assert.deepEqual([...facadeStyle.array], [...Array(20).fill(0), ...Array(20).fill(2), ...Array(20).fill(0)]);
+});
