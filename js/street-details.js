@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import { Fn, float, color, positionWorld, uniform, mod, fract, step, smoothstep, mix } from 'three/tsl';
+import { Fn, float, color, positionWorld, uniform, mod, fract, step, smoothstep, mix, attribute } from 'three/tsl';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import {
   AVENUES,
@@ -49,10 +49,13 @@ function createStreetSignBladeTexture(label) {
  * TSL 3-Aspect Traffic Signal Lens Material (Red y=5.78, Amber y=5.42, Green y=5.06)
  * Driven by the shared signal clock and SIGNAL_TIMING (city-config.js), which js/traffic.js obeys.
  */
-function createTrafficSignalLensMaterial(isAvenueHead, clock) {
+function createTrafficSignalLensMaterial(clock) {
   const { cycle, avenueAmber, avenueRed, streetAmber } = SIGNAL_TIMING;
   const mat = new THREE.MeshBasicNodeMaterial();
   mat.colorNode = Fn(() => {
+    // Per instance: 1 on a head that faces the avenue's traffic, 0 on one that faces the street's (one mesh and one
+    // draw for both)
+    const isAvenueHead = attribute('signalAvenue', 'float');
     const t = mod(clock, cycle);
     const wy = positionWorld.y;
     const isTopRed = step(5.60, wy);
@@ -61,15 +64,13 @@ function createTrafficSignalLensMaterial(isAvenueHead, clock) {
 
     // Avenue phase: Green, then Amber from avenueAmber, Red from avenueRed
     // Street phase: Red until avenueRed, then Green, Amber from streetAmber
-    const greenActive = isAvenueHead
-      ? float(1.0).sub(step(avenueAmber, t))
-      : step(avenueRed, t).mul(float(1.0).sub(step(streetAmber, t)));
-    const amberActive = isAvenueHead
-      ? step(avenueAmber, t).mul(float(1.0).sub(step(avenueRed, t)))
-      : step(streetAmber, t);
-    const redActive = isAvenueHead
-      ? step(avenueRed, t)
-      : float(1.0).sub(step(avenueRed, t));
+    const greenActive = mix(
+      step(avenueRed, t).mul(float(1.0).sub(step(streetAmber, t))),
+      float(1.0).sub(step(avenueAmber, t)),
+      isAvenueHead
+    );
+    const amberActive = mix(step(streetAmber, t), step(avenueAmber, t).mul(float(1.0).sub(step(avenueRed, t))), isAvenueHead);
+    const redActive = mix(float(1.0).sub(step(avenueRed, t)), step(avenueRed, t), isAvenueHead);
 
     const activeMask = isTopRed.mul(redActive)
       .add(isMidAmber.mul(amberActive))
@@ -128,8 +129,7 @@ function buildStreetDetails(scene, colliders = []) {
     metalness: 0.35,
     side: THREE.DoubleSide // the tunnel visors are open half-tubes
   });
-  const aveSignalLensMat = createTrafficSignalLensMaterial(true, signalClock);
-  const streetSignalLensMat = createTrafficSignalLensMaterial(false, signalClock);
+  const signalLensMat = createTrafficSignalLensMaterial(signalClock);
   const walkSignalGlow = createWalkSignalMaterial(signalClock);
   // Cobra-head LED streetlight lens & pedestrian post-top globe: pale diffuser by day, warm white after dusk
   const lampBulbGlow = new THREE.MeshBasicNodeMaterial();
@@ -505,8 +505,9 @@ function buildStreetDetails(scene, colliders = []) {
   addMatrixArrayInstanced(unitCyl, poleMetalMat, poleMatrices);
   addMatrixArrayInstanced(unitBox, poleMetalMat, armMatrices);
   addMatrixArrayInstanced(signalHousingGeo, signalHousingMat, yellowBoxMatrices);
-  addMatrixArrayInstanced(signalLensGeo, aveSignalLensMat, aveLensMatrices, false);
-  addMatrixArrayInstanced(signalLensGeo, streetSignalLensMat, streetLensMatrices, false);
+  signalLensGeo.setAttribute('signalAvenue', new THREE.InstancedBufferAttribute(
+    Float32Array.from([...aveLensMatrices.map(() => 1), ...streetLensMatrices.map(() => 0)]), 1));
+  addMatrixArrayInstanced(signalLensGeo, signalLensMat, [...aveLensMatrices, ...streetLensMatrices], false);
   addMatrixArrayInstanced(unitBox, streetBladeMat, streetBladeMatrices);
   addMatrixArrayInstanced(walkHousingGeo, signalHousingMat, walkBoxMatrices);
   addMatrixArrayInstanced(walkPanelGeo, walkSignalGlow, walkBoxMatrices, false);
