@@ -1,0 +1,37 @@
+# Publishes the site to GitHub Pages (https://slop-nyc-enhanced.ben3d.ca). The site is static files: index.html, css/
+# and js/ (three.js comes from a CDN, see the import map in index.html), so there is no build step.
+name: Publish to GitHub Pages
+
+on:
+  push:
+    branches: [ssr-brdf]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: node --test tests/*.cjs tests/*.mjs
+      - run: mkdir _site && cp -r index.html css js LICENSE _site/
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v5

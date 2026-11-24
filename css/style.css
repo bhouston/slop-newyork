@@ -205,6 +205,15 @@ body::after {
   line-height: 1.1;
 }
 
+.loader-subtitle {
+  margin-top: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  opacity: 0.7;
+}
+
 .loader-track {
   position: relative;
   width: 240px;
