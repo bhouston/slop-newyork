@@ -1908,6 +1908,16 @@ function createPartCollector() {
       add(material, unitBox, matrixOf(x, y, z, w, h, d, 0, ry, 0));
     },
     build(parent, { castShadow = false, receiveShadow = false } = {}) {
+      // Every landmark surface (createLandmarkMaterial) goes into one mesh, with its style on its vertices
+      const styled = [];
+      for (const [material, geos] of buckets) {
+        const style = material.userData.landmarkStyle;
+        if (!style) continue;
+        for (const g of geos) setLandmarkStyle(g, style, g.attributes.position.count);
+        styled.push(...geos);
+        buckets.delete(material);
+      }
+      if (styled.length) buckets.set(landmarkBatchMaterial(), styled);
       for (const [material, geos] of buckets) {
         const merged = geos.length === 1 ? geos[0] : mergeGeometries(geos, false);
         if (!merged) continue;
@@ -1921,27 +1931,65 @@ function createPartCollector() {
 }
 
 // Stone / metal surfaces (sRGB swatch) with a little world-space weathering, optional ashlar coursing (block height
-// in metres) and optional night floodlighting. The swatch & amounts are uniforms and both options are always in the
-// graph (switched off by a zero uniform), so every coursed (or plain) and floodlit (or not) landmark shares one shader
-function createLandmarkMaterial(rgb, { roughness = 0.8, metalness = 0.0, flood = 0.0, noise = 0.18, courses = 0, side = THREE.FrontSide } = {}) {
-  const mat = new THREE.MeshStandardNodeMaterial({ roughness, metalness, side });
-  const base = srgbUniform(rgb[0], rgb[1], rgb[2]);
-  const uNoise = uniform(noise);
+// in metres) and optional night floodlighting. Both options are always in the graph (switched off by a zero), so
+// every coursed (or plain) and floodlit (or not) landmark shares one shader. `p`: the surface's parameters, as nodes.
+function landmarkSurface(mat, p) {
   const n = valueNoise(positionWorld.xz.mul(0.35).add(positionWorld.y.mul(0.21)));
   const streak = valueNoise(vec2(positionWorld.x.add(positionWorld.z).mul(1.3), positionWorld.y.mul(0.06)));
-  const plain = base.mul(float(1.0).sub(uNoise).add(n.mul(uNoise.mul(1.2))).mul(mix(float(0.9), float(1.06), streak)));
-  const uCourses = uniform(courses || 1); // any block height where there is no coursing: uCoursed mixes it away
-  const uCoursed = uniform(courses > 0 ? 1 : 0);
-  const cv = positionWorld.y.div(uCourses).toVar();
+  const plain = p.base.mul(float(1.0).sub(p.noise).add(n.mul(p.noise.mul(1.2))).mul(mix(float(0.9), float(1.06), streak)));
+  const cv = positionWorld.y.div(p.courses).toVar();
   const row = floor(cv);
   const along = select(abs(normalWorld.x).greaterThan(abs(normalWorld.z)), positionWorld.z, positionWorld.x);
-  const cu = along.div(uCourses.mul(2.3)).add(row.mul(0.5)).toVar();
+  const cu = along.div(p.courses.mul(2.3)).add(row.mul(0.5)).toVar();
   const joint = filteredPulse(cv, 0.0, 0.92, fwidth(cv)).mul(filteredPulse(cu, 0.0, 0.965, fwidth(cu)));
   const coursing = mix(float(0.7), float(1.0), joint).mul(hash12(vec2(floor(cu), row)).mul(0.16).add(0.92));
-  const col = plain.mul(mix(float(1.0), coursing, uCoursed));
+  const col = plain.mul(mix(float(1.0), coursing, p.coursed));
   mat.colorNode = col;
-  mat.emissiveNode = col.mul(vec3(1.0, 0.86, 0.68)).mul(nightFactorNode().mul(uniform(flood)));
+  mat.emissiveNode = col.mul(vec3(1.0, 0.86, 0.68)).mul(nightFactorNode().mul(p.flood));
   return mat;
+}
+
+// A landmark surface with its parameters as uniforms. The part collector and the beam sets do not draw with it: they
+// merge every such surface into one mesh of landmarkBatchMaterial(), which reads the same parameters (kept in
+// userData.landmarkStyle) from vertex or instance attributes.
+function createLandmarkMaterial(rgb, { roughness = 0.8, metalness = 0.0, flood = 0.0, noise = 0.18, courses = 0, side = THREE.FrontSide } = {}) {
+  const mat = new THREE.MeshStandardNodeMaterial({ roughness, metalness, side });
+  // any block height where there is no coursing: `coursed` mixes it away
+  if (side === THREE.FrontSide) mat.userData.landmarkStyle = [toLinear(rgb[0]), toLinear(rgb[1]), toLinear(rgb[2]), courses || 1, roughness, metalness, flood, noise, courses > 0 ? 1 : 0];
+  return landmarkSurface(mat, {
+    base: srgbUniform(rgb[0], rgb[1], rgb[2]),
+    noise: uniform(noise),
+    courses: uniform(courses || 1),
+    coursed: uniform(courses > 0 ? 1 : 0),
+    flood: uniform(flood)
+  });
+}
+
+// The one material of every merged landmark surface: 'landmarkA' = linear colour & block height, 'landmarkB' =
+// roughness, metalness, floodlighting & weathering, 'landmarkC' = 1 where the surface is coursed
+let _landmarkBatchMaterial = null;
+function landmarkBatchMaterial() {
+  if (_landmarkBatchMaterial) return _landmarkBatchMaterial;
+  const a = attribute('landmarkA', 'vec4');
+  const b = attribute('landmarkB', 'vec4');
+  const mat = new THREE.MeshStandardNodeMaterial();
+  mat.roughnessNode = b.x;
+  mat.metalnessNode = b.y;
+  _landmarkBatchMaterial = landmarkSurface(mat, { base: a.xyz, courses: a.w, flood: b.z, noise: b.w, coursed: attribute('landmarkC', 'float') });
+  return _landmarkBatchMaterial;
+}
+
+// Sets a landmark style (userData.landmarkStyle) on `count` vertices or instances of a geometry, or one style after
+// the other for each of them
+function setLandmarkStyle(geometry, style, count, Attribute = THREE.BufferAttribute) {
+  const fill = (from, size) => {
+    const array = new Float32Array(count * size);
+    for (let i = 0; i < array.length; i++) array[i] = style[Math.floor(i / size) * 9 % style.length + from + i % size];
+    return new Attribute(array, size);
+  };
+  geometry.setAttribute('landmarkA', fill(0, 4));
+  geometry.setAttribute('landmarkB', fill(4, 4));
+  geometry.setAttribute('landmarkC', fill(8, 1));
 }
 
 function createEmissiveTrimMaterial(rgb, dayGlow, nightGlow) {
@@ -2632,13 +2680,35 @@ function createBeamSet() {
       push(material, m);
     },
     build(parent, name, shadowMats = new Set()) {
-      const geo = new THREE.BoxGeometry(1, 1, 1);
+      const box = new THREE.BoxGeometry(1, 1, 1);
+      // Every landmark surface (createLandmarkMaterial) goes into one mesh of those that cast a shadow and one of
+      // those that do not, with its style on its instances
+      const groups = new Map();
       for (const [material, mats] of sets) {
+        const style = material.userData.landmarkStyle;
+        const castShadow = shadowMats.has(material);
+        const key = style ? castShadow : material;
+        let group = groups.get(key);
+        if (!group) groups.set(key, (group = { material: style ? landmarkBatchMaterial() : material, castShadow, mats: [], styles: [] }));
+        for (const m of mats) {
+          group.mats.push(m);
+          if (style) group.styles.push(style);
+        }
+      }
+      for (const { material, castShadow, mats, styles } of groups.values()) {
+        let geo = box;
+        if (styles.length) {
+          geo = new THREE.BufferGeometry();
+          geo.setIndex(box.index);
+          geo.setAttribute('position', box.attributes.position);
+          geo.setAttribute('normal', box.attributes.normal);
+          setLandmarkStyle(geo, styles.flat(), mats.length, THREE.InstancedBufferAttribute);
+        }
         const mesh = new THREE.InstancedMesh(geo, material, mats.length);
         mats.forEach((m, i) => mesh.setMatrixAt(i, m));
         mesh.instanceMatrix.needsUpdate = true;
         mesh.computeBoundingSphere();
-        mesh.castShadow = shadowMats.has(material);
+        mesh.castShadow = castShadow;
         mesh.receiveShadow = false;
         mesh.name = name;
         parent.add(mesh);
