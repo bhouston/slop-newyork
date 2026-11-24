@@ -253,9 +253,10 @@ async function initApp() {
   // spatial denoiser out of SSGI: the materials are compiled against that chain, so the Inspector's switch for it
   // reloads the page.
   const address = new URLSearchParams(location.search);
-  const rendering = { method: 'AMD FSR1 (75% resolution)', historySampling: 'none', bloom: address.get('bloom') !== '0', ssgiDenoise: address.get('ssgiDenoise') !== '0' };
-  const fsrMethod = rendering.method;
+  const fsrMethod = 'AMD FSR1 (75% resolution)';
   const nativeMethod = 'Native (100% resolution)';
+  // By default: the full resolution, anti-aliased by TRAA with a bilinear read of its history
+  const rendering = { method: nativeMethod, historySampling: 'linear', bloom: address.get('bloom') !== '0', ssgiDenoise: address.get('ssgiDenoise') !== '0' };
   const sceneResolutionTargets = [];
 
   // The pre-pass draws the opaque geometry SSR and SSGI trace, without shading. It writes the lobe SSR answers: the
@@ -463,8 +464,8 @@ async function initApp() {
       opaqueFragmentSource(vec4(skyBounce.mul(skyBounceGain).mul(skyCoverage), skyCoverage))]
   });
 
-  // TRAA is off by default and can be switched on in the Inspector, at scene resolution in both modes (FSR1 is
-  // meant to upscale an anti-aliased source).
+  // TRAA runs at scene resolution in both modes (FSR1 is meant to upscale an anti-aliased source), and can be
+  // switched off in the Inspector.
   // History sampling is compiled into TRAA's resolve shader. Keep a separate graph per filter;
   // only the selected graph renders, and its history is reset whenever the selection changes.
   // 'none' is the beauty pass as it is, without TRAA (and so without its camera jitter), for comparison: FSR1 then
