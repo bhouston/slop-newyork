@@ -249,9 +249,13 @@ async function initApp() {
   //    selectable FSR1 upscaling or native TRAA, Bloom & Filmic Toning
   await showLoadingStage('Setting up visual effects, map and interface...', 'ui');
   const camera = cameraSystem.camera;
-  const rendering = { method: 'AMD FSR1 (75% resolution)', historySampling: 'catmull-rom' };
+  // ?bloom=0 in the address starts without the bloom (the Inspector switches it too). ?ssgiDenoise=0 leaves the
+  // spatial denoiser out of SSGI: the materials are compiled against that chain, so the Inspector's switch for it
+  // reloads the page.
+  const address = new URLSearchParams(location.search);
+  const rendering = { method: 'AMD FSR1 (75% resolution)', historySampling: 'none', bloom: address.get('bloom') !== '0', ssgiDenoise: address.get('ssgiDenoise') !== '0' };
   const fsrMethod = rendering.method;
-  const nativeMethod = 'TRAA (100% resolution)';
+  const nativeMethod = 'Native (100% resolution)';
   const sceneResolutionTargets = [];
 
   // The pre-pass draws the opaque geometry SSR and SSGI trace, without shading. It writes the lobe SSR answers: the
@@ -338,8 +342,8 @@ async function initApp() {
   // pass returns both the light of the directions the screen occludes and how much of the hemisphere stays open
   // (its AO), so there is no separate AO pass.
   const giPass = ssgi(previousBeauty, lowDepth, lowSceneNormal, camera);
-  giPass.sliceCount.value = 4;
-  giPass.stepCount.value = 32;
+  giPass.sliceCount.value = 2;
+  giPass.stepCount.value = 8;
   giPass.radius.value = 32;
   const giNode = giPass.getGINode();
   const aoNode = giPass.getAONode();
@@ -347,8 +351,8 @@ async function initApp() {
   // filtered over space by an edge-aware blur (SVGF's à-trous wavelets, guided by the depth and the normals, two
   // passes for a span of 9 texels) and then accumulated over time like SSR, at half resolution, before the upsample.
   const giInput = rtt(vec4(giNode.sample(screenUV).rgb, aoNode.sample(screenUV).r), null, null, { resolutionScale: 0.5 });
-  const giDenoised = denoise(giInput, { depth: lowDepth, normal: lowSceneNormal, camera, alpha: true });
-  const giAccumulated = temporalReproject(giDenoised.getTextureNode(), lowDepth, lowNormal, downsample.getTextureNode('velocity'), camera, {
+  const giDenoised = rendering.ssgiDenoise ? denoise(giInput, { depth: lowDepth, normal: lowSceneNormal, camera, alpha: true }) : null;
+  const giAccumulated = temporalReproject(giDenoised ? giDenoised.getTextureNode() : giInput, lowDepth, lowNormal, downsample.getTextureNode('velocity'), camera, {
     mode: 'diffuse',
     accumulate: true,
     normalDecode
@@ -459,15 +463,25 @@ async function initApp() {
       opaqueFragmentSource(vec4(skyBounce.mul(skyBounceGain).mul(skyCoverage), skyCoverage))]
   });
 
-  // FSR1 needs an anti-aliased source: retain TRAA at scene resolution in both modes.
+  // TRAA is off by default and can be switched on in the Inspector, at scene resolution in both modes (FSR1 is
+  // meant to upscale an anti-aliased source).
   // History sampling is compiled into TRAA's resolve shader. Keep a separate graph per filter;
   // only the selected graph renders, and its history is reset whenever the selection changes.
-  const variants = Object.fromEntries(['catmull-rom', 'linear'].map((filter) => {
-    const antialiased = traa(beautyPass, prePassDepth, prePassVelocity, camera);
-    antialiased.historySampling = filter;
-    const upscaled = fsr1(antialiased.getTextureNode()).getTextureNode();
-    const sceneColors = { [fsrMethod]: upscaled, [nativeMethod]: antialiased };
-    const grades = Object.fromEntries(Object.entries(sceneColors).map(([method, node]) => [method, createPostProcessing(renderer, node)]));
+  // 'none' is the beauty pass as it is, without TRAA (and so without its camera jitter), for comparison: FSR1 then
+  // upscales the aliased edges, and the noise SSR and SSGI leave is no longer averaged out.
+  const variants = Object.fromEntries(['catmull-rom', 'linear', 'none'].map((filter) => {
+    const antialiased = filter === 'none' ? null : traa(beautyPass, prePassDepth, prePassVelocity, camera);
+    if (antialiased) antialiased.historySampling = filter;
+    const source = antialiased ? antialiased.getTextureNode() : beautyPass.getTextureNode('output');
+    const upscaled = fsr1(source).getTextureNode();
+    // TRAA builds the pre-pass before the beauty pass, which shades on top of its depth. Without TRAA nothing in the
+    // output graph does, and the beauty pass would render first, on last frame's depth (of another size after a
+    // change of resolution): a read of the depth that adds nothing puts the pre-pass first.
+    const afterPrePass = (node) => antialiased ? node : prePassDepth.sample(screenUV).r.mul(0).add(node);
+    const sceneColors = { [fsrMethod]: afterPrePass(upscaled), [nativeMethod]: antialiased ?? afterPrePass(source) };
+    // the bloom is made from the scene before FSR1 upscales it
+    const grades = Object.fromEntries(Object.entries(sceneColors).map(([method, node]) => [method,
+      method === fsrMethod ? createPostProcessing(renderer, node, source) : createPostProcessing(renderer, node)]));
     return [filter, { antialiased, sceneColors, grades }];
   }));
   const selectedVariant = () => variants[rendering.historySampling];
@@ -475,7 +489,7 @@ async function initApp() {
   const allGrades = Object.values(variants).flatMap((variant) => Object.values(variant.grades));
   // Keep time-of-day grading in sync across the inactive graphs too.
   const colorGrade = {
-    get outputNode() { return selectedVariant().grades[rendering.method].outputNode; },
+    get outputNode() { return selectedVariant().grades[rendering.method][rendering.bloom ? 'outputNode' : 'outputNodeWithoutBloom']; },
     applyPreset: (...args) => allGrades.forEach((grade) => grade.applyPreset(...args)),
     transitionTo: (...args) => allGrades.forEach((grade) => grade.transitionTo(...args)),
     update: () => allGrades.forEach((grade) => grade.update())
@@ -485,28 +499,21 @@ async function initApp() {
     for (const target of [prePass, beautyPass, previousBeauty, ...sceneResolutionTargets]) target.setResolutionScale(scale);
     giInput.setResolutionScale(0.5 * scale);
     skyVisibilityLow.setResolutionScale(0.5 * scale);
-    selectedVariant().antialiased.reset(); // scene and temporal histories resize on their next render
+    allGrades.forEach((grade) => grade.setResolutionScale(scale));
+    selectedVariant().antialiased?.reset(); // scene and temporal histories resize on their next render
   }
   setRenderingResolution();
   const renderPipeline = new THREE.RenderPipeline(renderer, colorGrade.outputNode);
 
-  // The gear and gauge buttons open the three.js Inspector, created on first use, on its Parameters tab (the
-  // pipeline's buffers as outputs and the SSR / SSGI settings) and on its Performance tab (the frame rate and the
-  // CPU / GPU time of each pass). Clicking the button of the open tab hides the Inspector.
+  // ?inspector=true in the address shows the three.js Inspector: its Parameters tab (the pipeline's buffers as
+  // outputs and the rendering, SSR and SSGI settings) and its Performance tab (the frame rate and the CPU / GPU time
+  // of each pass). It is not loaded otherwise.
   let inspector = null;
-  const inspectorButtons = { parameters: document.getElementById('btn-inspector'), performance: document.getElementById('btn-performance') };
-  for (const [tab, button] of Object.entries(inspectorButtons)) if (button) button.addEventListener('click', async () => {
-    if (inspector === null) {
-      inspector = new (await import('three/addons/inspector/Inspector.js')).Inspector();
-      renderer.inspector = inspector;
-      inspector.domElement.style.zIndex = 1000; // above the HUD
-      addInspectorParameters();
-    }
-    const style = inspector.domElement.style;
-    const shown = style.display !== 'none' && button.getAttribute('aria-pressed') === 'true';
-    style.display = shown ? 'none' : '';
-    if (!shown) inspector.profiler.setActiveTab(inspector[tab].id); // regardless of the saved Inspector tab
-    for (const [name, other] of Object.entries(inspectorButtons)) if (other) other.setAttribute('aria-pressed', String(!shown && name === tab));
+  if (address.get('inspector') === 'true') import('three/addons/inspector/Inspector.js').then(({ Inspector }) => {
+    inspector = new Inspector();
+    renderer.inspector = inspector;
+    inspector.domElement.style.zIndex = 1000; // above the HUD
+    addInspectorParameters();
   });
   // profilePasses(seconds) in the console, or tools/profile-passes.mjs: where the time of a frame goes, by pass
   // (js/pass-profiler.js). The scene's passes are named by what they draw to.
@@ -560,7 +567,7 @@ async function initApp() {
       'SSR accumulated': show(reflection.rgb),
       'SSR coverage': show(reflection.a),
       'SSGI light (half res)': show(giNode.sample(screenUV).rgb),
-      'SSGI light blurred (half res)': show(giDenoised.getTextureNode().sample(screenUV).rgb),
+      ...(giDenoised ? { 'SSGI light blurred (half res)': show(giDenoised.getTextureNode().sample(screenUV).rgb) } : {}),
       'SSGI light accumulated': show(gi.rgb),
       'SSGI AO': show(gi.a),
       'SSGI coverage': show(gi.a.oneMinus()),
@@ -595,8 +602,10 @@ async function initApp() {
     const renderingGui = inspector.createParameters('Rendering');
     const methodControl = renderingGui.add(rendering, 'method', [fsrMethod, nativeMethod]).name('Method')
       .onChange(() => updateRendering('method', methodControl));
-    const samplingControl = renderingGui.add(rendering, 'historySampling', { 'Catmull-Rom': 'catmull-rom', 'Bilinear': 'linear' }).name('TRAA history interpolation')
+    const samplingControl = renderingGui.add(rendering, 'historySampling', { 'Catmull-Rom history': 'catmull-rom', 'Bilinear history': 'linear', 'Off': 'none' }).name('TRAA')
       .onChange(() => updateRendering('historySampling', samplingControl));
+    const bloomControl = renderingGui.add(rendering, 'bloom').name('Bloom').onChange(() => updateRendering('bloom', bloomControl));
+    window.rendering = { set: (property, value) => ({ historySampling: samplingControl, bloom: bloomControl, method: methodControl })[property].setValue(value) }; // for scripted screenshots
     renderingGui.add(upsampleTolerance, 'value', { 'Joint bilateral': UPSAMPLE_JOINT, 'Bilinear': UPSAMPLE_BILINEAR }).name('SSR / SSGI upsampling');
     const outputControl = inspector.createParameters('Output').add(state, 'output', Object.keys(outputs)).name('Show').onChange(showOutput);
     window.showOutput = (name) => outputControl.setValue(name); // for scripted screenshots
@@ -625,7 +634,12 @@ async function initApp() {
     giGui.add(giPass.useLinearThickness, 'value').name('Linear thickness');
     giGui.add(giPass.useScreenSpaceSampling, 'value').name('Screen-space sampling');
     giGui.add(giPass, 'useTemporalFiltering').name('Per-frame noise');
-    giGui.add(giDenoised.luminancePhi, 'value', 0, 10, 0.1).name('Blur strength');
+    giGui.add(rendering, 'ssgiDenoise').name('Spatial denoise (reloads)').onChange((on) => {
+      if (on) address.delete('ssgiDenoise');
+      else address.set('ssgiDenoise', '0');
+      location.search = address.toString();
+    });
+    if (giDenoised) giGui.add(giDenoised.luminancePhi, 'value', 0, 10, 0.1).name('Blur strength');
     giGui.add(giAccumulated.maxFrames, 'value', 1, 64, 1).name('History frames');
     const skyGui = inspector.createParameters('Sky occlusion');
     skyGui.add(skyIntensity, 'value', { 'Height map': 1, 'Canyon AO (before)': 0 }).name('From');
@@ -707,6 +721,22 @@ async function initApp() {
       captureButton.title = title;
     }
   });
+
+  // For scripted screenshots (tools outside the page): hold() stops the world as the capture does and sets the
+  // drawing buffer's size, grab() resolves with a rendered frame as a PNG data URL after `settle` frames, and the
+  // switches of the sources are there to set. grab() also works while the world runs (for the motion vectors).
+  window.shots = {
+    heroIntensity, giIntensity, ssrIntensity, skyIntensity, skyBounceGain, rendering,
+    hold(on, width = CAPTURE_WIDTH, height = CAPTURE_HEIGHT) {
+      capturing = on;
+      renderer.setSize(on ? width : window.innerWidth, on ? height : window.innerHeight, !on);
+      cameraSystem.onResize(on ? width : window.innerWidth, on ? height : window.innerHeight);
+    },
+    async grab(settle = CAPTURE_SETTLE_FRAMES) {
+      for (let f = 0; f < settle; f++) await captureFrame();
+      return captureFrame(() => renderer.domElement.toDataURL('image/png'));
+    }
+  };
 
   // 6. Wire UI Controls (Strictly using safe DOM APIs: textContent, classList, addEventListener)
   const modeButtons = document.querySelectorAll('[data-mode]');
@@ -1232,6 +1262,7 @@ async function initApp() {
       markInit('warmup');
     }
     renderPipeline.render();
+    if (afterCaptureFrame) afterCaptureFrame();
     updateHeroProbe();
     if (!warmedUp) {
       warmedUp = true;

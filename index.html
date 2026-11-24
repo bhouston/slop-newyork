@@ -11,10 +11,10 @@
   <script type="importmap">
     {
       "imports": {
-        "three": "https://rawcdn.githack.com/bhouston/three.js/65ad4b5f19f6b91641984b5815855a8ee5899e37/build/three.webgpu.js",
-        "three/webgpu": "https://rawcdn.githack.com/bhouston/three.js/65ad4b5f19f6b91641984b5815855a8ee5899e37/build/three.webgpu.js",
-        "three/tsl": "https://rawcdn.githack.com/bhouston/three.js/65ad4b5f19f6b91641984b5815855a8ee5899e37/build/three.tsl.js",
-        "three/addons/": "https://rawcdn.githack.com/bhouston/three.js/65ad4b5f19f6b91641984b5815855a8ee5899e37/examples/jsm/"
+        "three": "https://rawcdn.githack.com/bhouston/three.js/32bdab3a4c4e2e2d496f892b6e618de3774139eb/build/three.webgpu.js",
+        "three/webgpu": "https://rawcdn.githack.com/bhouston/three.js/32bdab3a4c4e2e2d496f892b6e618de3774139eb/build/three.webgpu.js",
+        "three/tsl": "https://rawcdn.githack.com/bhouston/three.js/32bdab3a4c4e2e2d496f892b6e618de3774139eb/build/three.tsl.js",
+        "three/addons/": "https://rawcdn.githack.com/bhouston/three.js/32bdab3a4c4e2e2d496f892b6e618de3774139eb/examples/jsm/"
       }
     }
   </script>
@@ -93,8 +93,6 @@
       <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12s3.5-6.5 9.5-6.5 9.5 6.5 9.5 6.5-3.5 6.5-9.5 6.5S2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/></symbol>
       <symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M3.5 3.5l17 17M10.6 5.6c.5-.1.9-.1 1.4-.1 6 0 9.5 6.5 9.5 6.5a16 16 0 0 1-2.4 3.2M6.6 6.6A15.6 15.6 0 0 0 2.5 12s3.5 6.5 9.5 6.5c1.6 0 3.1-.4 4.4-1.1M9.9 9.9a2.8 2.8 0 0 0 4.2 4.2"/></symbol>
       <symbol id="i-capture" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="3.5"/></symbol>
-      <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/></symbol>
-      <symbol id="i-gauge" viewBox="0 0 24 24"><path d="M4 17a8 8 0 1 1 16 0M12 17l4-6"/></symbol>
       <symbol id="i-sound" viewBox="0 0 24 24"><path d="m11 4-5 4H3v8h3l5 4V4ZM15 8a6 6 0 0 1 0 8M18 5a10 10 0 0 1 0 14"/></symbol>
       <symbol id="i-sound-off" viewBox="0 0 24 24"><path d="m11 4-5 4H3v8h3l5 4V4ZM16 9l6 6M22 9l-6 6"/></symbol>
       <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m7 9.5 5 5 5-5"/></symbol>
@@ -168,12 +166,6 @@
       </button>
       <button id="btn-toggle-hud" class="tool-btn icon-only" type="button" title="Clean view: hide the HUD [H]" aria-label="Hide HUD" aria-pressed="false">
         <svg class="icon icon-hide" aria-hidden="true"><use href="#i-eye"/></svg><svg class="icon icon-show" aria-hidden="true"><use href="#i-eye-off"/></svg>
-      </button>
-      <button id="btn-inspector" class="tool-btn icon-only" type="button" title="Rendering inspector: buffers and SSR / SSGI settings" aria-label="Rendering inspector" aria-pressed="false">
-        <svg class="icon" aria-hidden="true"><use href="#i-gear"/></svg>
-      </button>
-      <button id="btn-performance" class="tool-btn icon-only" type="button" title="Performance: frame rate and the CPU / GPU time of each pass" aria-label="Performance" aria-pressed="false">
-        <svg class="icon" aria-hidden="true"><use href="#i-gauge"/></svg>
       </button>
       <button id="btn-capture" class="tool-btn icon-only" type="button" title="Capture the lighting breakdown as an animated WebP (1920 x 1080)" aria-label="Capture lighting breakdown">
         <svg class="icon" aria-hidden="true"><use href="#i-capture"/></svg>

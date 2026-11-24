@@ -29,7 +29,9 @@ const LOOKS = {
   midnight: { exposure: 1.04, contrast: 1.08, saturation: 1.06, balance: [0.985, 1.00, 1.035], bloom: 0.30, threshold: 1.00 }
 };
 
-function createPostProcessing(renderer, sceneColor) {
+// sceneColor: the image to grade. bloomSource: the image the bloom is made from, which is the scene before it is
+// upscaled (FSR1), so the bloom costs what the lower resolution costs; it is a blur, added on top after the upscale.
+function createPostProcessing(renderer, sceneColor, bloomSource = sceneColor) {
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   // Exposure is applied before bloom so its threshold follows the image's exposed brightness.
   // RenderPipeline performs ACES and the output color-space conversion exactly once, after this graph.
@@ -43,14 +45,17 @@ function createPostProcessing(renderer, sceneColor) {
 
   // Limit only bloom's peak radiance, scaling RGB together to retain neon and lamp colors.
   // The original HDR image keeps its full range for the tone mapper's highlight shoulder.
-  const peak = max(max(exposed.r, exposed.g), exposed.b);
-  const bloomInput = vec4(exposed.mul(float(8.0).div(max(peak, 8.0))), 1.0);
+  const bloomExposed = bloomSource === sceneColor ? exposed : max(bloomSource.rgb, vec3(0)).mul(exposure).mul(balance);
+  const peak = max(max(bloomExposed.r, bloomExposed.g), bloomExposed.b);
+  const bloomInput = vec4(bloomExposed.mul(float(8.0).div(max(peak, 8.0))), 1.0);
   const bloomPass = bloom(bloomInput, 0.24, 0.40, 1.20);
   bloomPass.smoothWidth.value = 0.30;
-  bloomPass.setResolutionScale(0.35);
+  // The bloom's buffers are 0.35 of the scene's resolution (scale: the scene's share of the output's)
+  const setResolutionScale = (scale) => bloomPass.setResolutionScale(0.35 * scale);
+  setResolutionScale(1);
 
-  const outputNode = Fn(() => {
-    const color = exposed.add(bloomPass.rgb).toVar();
+  const grade = (graded) => Fn(() => {
+    const color = graded.toVar();
     const luma = dot(color, vec3(0.2126, 0.7152, 0.0722)).toVar();
 
     // Gentle cool shadow / warm highlight separation; multiply rather than lifting the black level.
@@ -71,6 +76,9 @@ function createPostProcessing(renderer, sceneColor) {
     const vignette = float(1).sub(smoothstep(0.35, 1.0, radius).mul(0.12));
     return vec4(color.mul(vignette), 1.0);
   })();
+  const outputNode = grade(exposed.add(bloomPass.rgb));
+  // Without the bloom: its passes are not in this graph, so they are not rendered at all
+  const outputNodeWithoutBloom = grade(exposed);
 
   // The look shown, and a change of look under way (from what was shown to `to`, eased in and out)
   const shown = { ...LOOKS.golden, balance: [...LOOKS.golden.balance] };
@@ -112,7 +120,7 @@ function createPostProcessing(renderer, sceneColor) {
   }
 
   applyPreset('golden');
-  return { outputNode, applyPreset, transitionTo, update };
+  return { outputNode, outputNodeWithoutBloom, setResolutionScale, applyPreset, transitionTo, update };
 }
 
 export { createPostProcessing };
