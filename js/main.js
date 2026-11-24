@@ -30,7 +30,7 @@ import { LightingSystem } from './lighting.js';
 import { createSkyOcclusion } from './sky-occlusion.js';
 import { canyonSkyAO, cityUniforms } from './tsl-materials.js';
 import { NYCMapSystem } from './nyc-map.js';
-import { setupSceneCulling, updateSceneCulling } from './scene-culling.js';
+import { setupSceneCulling, updateSceneCulling, hideFromProbe, showAfterProbe } from './scene-culling.js';
 import { CityAudioSystem } from './audio-system.js';
 
 // Application setup, shader warm-up and frame loop.
@@ -404,7 +404,11 @@ async function initApp() {
   const heroSpecular = ({ direction, roughness }) => vec4(cubeTexture(heroTarget.texture, direction).level(roughness.mul(heroMips)).rgb.mul(heroCoverage), heroCoverage);
   const heroDiffuse = ({ normal }) => vec4(cubeTexture(heroTarget.texture, normal).level(heroMips - 1).rgb.mul(Math.PI).mul(heroCoverage), heroCoverage);
   let heroFace = -1;
-  // One face per frame (a face is one more draw of the city), after the frame is rendered. All six on the first call.
+  let heroFrame = 0;
+  const HERO_INTERVAL = 3; // frames between the faces: the cube is as new as 18 frames
+  // One face every few frames (a face is one more draw of the city), after the frame is rendered, and without the
+  // props and trees too far away to show in it (scene-culling.js). All six, of everything, on the first call, which
+  // compiles every pipeline behind the loading screen.
   // The probe is lit with the sun's shadow maps of the frame: three.js would fit and draw the cascades again for the
   // camera of the face (two more draws of the city's casters). The frame's cascades are fitted to the view, so the
   // probe's shadows are right around the vehicle and in front of the camera, and not to be trusted behind it.
@@ -412,6 +416,7 @@ async function initApp() {
     const entity = controllerManager.getActiveEntity();
     heroMesh = entity?.mesh ?? null;
     if (heroMesh === null || heroIntensity.value === 0) return;
+    if (heroFace >= 0 && heroFrame++ % HERO_INTERVAL !== 0) return;
     heroCamera.position.copy(entity.position).y += 1;
     heroCamera.updateMatrixWorld();
     const visible = entity.mesh.visible;
@@ -423,9 +428,11 @@ async function initApp() {
     if (heroFace < 0) {
       heroCamera.update(renderer, scene);
     } else {
+      hideFromProbe(heroCamera.position);
       renderer.setRenderTarget(heroTarget, heroFace);
       renderer.render(scene, heroCamera.children[heroFace]);
       renderer.setRenderTarget(null);
+      showAfterProbe();
     }
     heroFace = (heroFace + 1) % 6;
     entity.mesh.visible = visible;

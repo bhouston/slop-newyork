@@ -947,6 +947,8 @@ function createTreeField(_scene, sites, colliders = []) {
       const cellGroup = new THREE.Group();
       cellGroup.name = `TreeCell_${label}`;
       cellGroup.visible = false;
+      // The cell's bounds on the ground, for the hero probe's culling (scene-culling.js)
+      cellGroup.userData.probeSphere = { x: (cellX + 0.5) * TREE_CELL_SIZE, z: (cellZ + 0.5) * TREE_CELL_SIZE, r: TREE_CELL_SIZE * Math.SQRT1_2 };
       group.add(cellGroup);
       cell = { group: cellGroup, label, trees: [], meshes: new Map() };
       cells.set(cellKey, cell);

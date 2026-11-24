@@ -344,9 +344,47 @@ function setupSceneCulling(scene, roots, shadow = null) {
   }
 
   state.culled = culled;
+
+  // What the hero probe leaves out (hideFromProbe): the distance-culled props, the cells of street trees and the
+  // outer boroughs' buildings
+  const probe = culled.map((c) => ({ object: c.mesh, x: c.x, z: c.z, reach: c.r + PROBE_PROP_RANGE }));
+  for (const root of roots) {
+    root.traverse((o) => {
+      const sphere = o.userData.probeSphere; // a group that states its own bounds (trees.js)
+      if (sphere) probe.push({ object: o, x: sphere.x, z: sphere.z, reach: sphere.r + PROBE_TREE_RANGE });
+      else if (o.isMesh && o.name.startsWith('BoroughBuildings')) probe.push({ object: o, x: 0, z: 0, reach: -1 });
+    });
+  }
+  state.probe = probe;
 }
 
-const state = { culled: [] };
+const state = { culled: [], probe: [] };
+
+// The hero probe (main.js) is a 128 px cube face, where a metre is a pixel at 64 m: it is drawn without the props
+// and the trees it could not show, which were most of its draw calls. The chunks are hundreds of metres across, so
+// the ones around the probe stay whole.
+// ponytail: the boroughs' buildings are left out at any distance, their towers too (a few pixels across the river);
+// give them a reach if a vehicle's reflections miss a skyline
+const PROBE_PROP_RANGE = 60;
+const PROBE_TREE_RANGE = 250;
+const _probeHidden = [];
+
+// Hides them for a render of the probe at `position`; showAfterProbe() puts them back
+function hideFromProbe(position) {
+  for (const p of state.probe) {
+    if (!p.object.visible) continue;
+    const dx = p.x - position.x;
+    const dz = p.z - position.z;
+    if (p.reach >= 0 && dx * dx + dz * dz < p.reach * p.reach) continue;
+    p.object.visible = false;
+    _probeHidden.push(p.object);
+  }
+}
+
+function showAfterProbe() {
+  for (const object of _probeHidden) object.visible = true;
+  _probeHidden.length = 0;
+}
 
 // Per frame (after the warm-up frame, which must see everything): hide the chunks beyond their cull distance
 function updateSceneCulling(cameraPosition) {
@@ -359,4 +397,4 @@ function updateSceneCulling(cameraPosition) {
   }
 }
 
-export { setupSceneCulling, updateSceneCulling, SHADOW_PROXY_LAYER };
+export { setupSceneCulling, updateSceneCulling, hideFromProbe, showAfterProbe, SHADOW_PROXY_LAYER };
