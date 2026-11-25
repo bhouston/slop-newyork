@@ -1216,8 +1216,9 @@ async function initApp() {
     const rawDt = (now - lastTime) * 0.001;
     lastTime = now;
     const dt = Math.min(Math.max(rawDt, 0.001), 0.05);
-    // A capture holds the world and the camera still, so its frames differ in their lighting alone
-    if (capturing) {
+    // A capture holds the world and the camera still, so its frames differ in their lighting alone. Not before the
+    // first frame: shots.hold() can be called while the shaders still compile, and the camera has no place yet
+    if (capturing && warmedUp) {
       syncSkyOcclusion();
       renderPipeline.render();
       if (afterCaptureFrame) afterCaptureFrame();
