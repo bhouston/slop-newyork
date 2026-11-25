@@ -487,6 +487,8 @@ async function initApp() {
   const variants = Object.fromEntries(['catmull-rom', 'linear', 'none'].map((filter) => {
     const antialiased = filter === 'none' ? null : traa(beautyPass, prePassDepth, prePassVelocity, camera);
     if (antialiased) antialiased.historySampling = filter;
+    // the velocity's alpha holds previousViewZ: the disocclusion test follows the vehicles as they move
+    if (antialiased) antialiased.usePreviousViewZ = true;
     const source = antialiased ? antialiased.getTextureNode() : beautyPass.getTextureNode('output');
     const upscaled = fsr1(source).getTextureNode();
     // TRAA builds the pre-pass before the beauty pass, which shades on top of its depth. Without TRAA nothing in the
