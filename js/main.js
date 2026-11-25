@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import { Fn, output, pass, mrt, builtinIndirectContext, clearcoat, sample, packNormalToOctahedral, unpackOctahedralToNormal, vec2, vec3, vec4, velocity, rtt, screenUV, screenSize, uniform, getViewPosition, cubeTexture } from 'three/tsl';
+import { Fn, output, pass, mrt, builtinIndirectContext, defaultIndirectSpecular, defaultIndirectDiffuse, clearcoat, sample, packNormalToOctahedral, unpackOctahedralToNormal, vec2, vec3, vec4, velocity, rtt, screenUV, screenSize, uniform, getViewPosition, cubeTexture } from 'three/tsl';
 import { ssr } from 'three/addons/tsl/display/SSRNode.js';
 import { depthAwareDownsample } from 'three/addons/tsl/display/DepthAwareDownsampleNode.js';
 import { jointBilateralUpsample } from 'three/addons/tsl/display/JointBilateralUpsample.js';
@@ -7,6 +7,7 @@ import { temporalReproject } from 'three/addons/tsl/display/TemporalReprojectNod
 import { reprojectedBeauty, previousViewZ } from 'three/addons/tsl/display/ReprojectedBeautyNode.js';
 import { opaqueFragment, opaqueFragmentSource } from 'three/addons/tsl/utils/OpaqueFragment.js';
 import { outermostNormalView, outermostRoughness, outermostMetalness } from 'three/addons/tsl/utils/OutermostLobe.js';
+import { coverageCascade } from 'three/addons/tsl/lighting/CoverageCascade.js';
 import { ssgi } from 'three/addons/tsl/display/SSGINode.js';
 import { denoise } from 'three/addons/tsl/display/DenoiseNode.js';
 import { traa } from 'three/addons/tsl/display/TRAANode.js';
@@ -439,13 +440,15 @@ async function initApp() {
     sunShadow.autoUpdate = autoUpdate;
   }
 
-  // The materials read all of it through their BRDF, each source filling what the one before left uncovered.
-  // Indirect specular: SSR, the hero probe, the environment. Indirect diffuse: SSGI (whose coverage is its occlusion,
-  // so the AO is not applied a second time), the hero probe, the environment.
-  // For the inspector's two indirect light outputs, a last specular source that answers nothing notes the lighting
-  // variables of the shader being built: its radiance and irradiance are what those lists and the environment resolve to.
+  // The materials read all of it through their BRDF. three.js asks one provider for the indirect specular light and
+  // one for the indirect diffuse: here each is a coverage cascade, each source filling what the one before left
+  // uncovered, and the default provider (the environment and the hemisphere light) filling the rest.
+  // Indirect specular: SSR, the hero probe, the default. Indirect diffuse: SSGI (whose coverage is its occlusion,
+  // so the AO is not applied a second time), the hero probe, the sky occlusion, the default.
+  // For the inspector's two indirect light outputs, the specular provider notes the lighting variables of the shader
+  // being built: its radiance and irradiance are what the providers return.
   const lightingOf = new WeakMap(); // by the builder's node list: Fn() gets a proxy of the builder, not the builder
-  const noteLighting = (query, builder) => (lightingOf.set(builder.nodes, builder.context), null);
+  const noteLighting = (provider) => (query, builder) => (lightingOf.set(builder.nodes, builder.context), provider(query, builder));
   const resolvedLight = (get) => Fn((builder) => lightingOf.has(builder.nodes) ? vec4(get(lightingOf.get(builder.nodes)), 1)
     : vec4(0, 0, 0, builder.material.transparent ? 0 : 1))(); // unlit: black, or what is behind it if transparent
   const indirectMRT = mrt({
@@ -454,7 +457,7 @@ async function initApp() {
       const coat = c.lightingModel.clearcoatRadiance;
       return coat ? clearcoat.greaterThan(0).select(coat, c.radiance) : c.radiance;
     }),
-    // before the material's own AO. The hemisphere light is in it: it fills what the sources leave open, like the environment
+    // as the provider returns it. The hemisphere light is in it: it fills what the sources leave open, like the environment
     indirectDiffuse: resolvedLight((c) => c.irradiance.add(c.occlusionAwareIrradiance))
   });
   // The alpha above decides what a fragment replaces, whatever the blending of its material
@@ -465,10 +468,14 @@ async function initApp() {
   const ssrIntensity = uniform(1);
   const giIntensity = uniform(1);
   beautyPass.contextNode = builtinIndirectContext({
-    specular: [opaqueFragmentSource(ssrNode.getSpecularSource(reflection).mul(ssrIntensity)), heroSpecular, noteLighting],
+    specular: noteLighting(coverageCascade([
+      opaqueFragmentSource(ssrNode.getSpecularSource(reflection).mul(ssrIntensity)), heroSpecular
+    ], defaultIndirectSpecular)),
     // the sky occlusion covers the part of the environment the buildings hide, with the light they bounce
-    diffuse: [opaqueFragmentSource(giPass.getDiffuseSource(gi.rgb, gi.a).mul(giIntensity)), heroDiffuse,
-      opaqueFragmentSource(vec4(skyBounce.mul(skyBounceGain).mul(skyCoverage), skyCoverage))]
+    diffuse: coverageCascade([
+      opaqueFragmentSource(giPass.getDiffuseSource(gi.rgb, gi.a).mul(giIntensity)), heroDiffuse,
+      opaqueFragmentSource(vec4(skyBounce.mul(skyBounceGain).mul(skyCoverage), skyCoverage))
+    ], defaultIndirectDiffuse)
   });
 
   // TRAA runs at scene resolution in both modes (FSR1 is meant to upscale an anti-aliased source), and can be
