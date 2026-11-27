@@ -50,6 +50,12 @@ function passLabel(stats) {
   return target ? `${stats.name} ${target.width}x${target.height}` : `${stats.name} (canvas)`;
 }
 
+// The Inspector files the consecutive calls named "Group / Pass" under a group of that name. Here they are the
+// calls of their parent again, each under its full name: [call, the names of its groups]
+function ungroup(children, prefix = '') {
+  return children.flatMap((child) => child.isGroupStats ? ungroup(child.children, `${prefix}${child.name} / `) : [[child, prefix]]);
+}
+
 class PassProfiler extends RendererInspector {
   // label(stats): the name of a call, from its stats (name, scene, camera, renderTarget, computeNode, parent)
   constructor({ label = passLabel } = {}) {
@@ -106,8 +112,9 @@ class PassProfiler extends RendererInspector {
     const segments = []; // [start, end, row]: the part of a call's span that is its own
     const visit = (stats, path) => {
       const names = new Map();
-      for (const child of stats.children) {
-        let name = this.label(child);
+      for (const [child, groups] of ungroup(stats.children)) {
+        const nestedCalls = ungroup(child.children).map(([call]) => call);
+        let name = groups + this.label(child);
         const count = (names.get(name) || 0) + 1;
         names.set(name, count);
         if (count > 1) name += ` #${count}`; // the calls of a frame that share a name, in order
@@ -115,14 +122,14 @@ class PassProfiler extends RendererInspector {
         let row = run.rows.get(key);
         if (!row) run.rows.set(key, row = { name: key, depth: key.split(' > ').length - 1, calls: 0, draws: 0, triangles: 0, cpu: 0, gpu: 0, span: 0 });
         row.calls++;
-        const own = (key) => (child[key] || 0) - child.children.reduce((sum, c) => sum + (c[key] || 0), 0);
+        const own = (key) => (child[key] || 0) - nestedCalls.reduce((sum, c) => sum + (c[key] || 0), 0);
         row.cpu += own('cpu');
         row.draws += own('draws');
         row.triangles += own('triangles');
         if (child.gpuNotAvailable) run.missing++;
         if (child.gpuStart != null) {
           if ((child.gpuStart * 10) % 1 > 1e-3) run.quantized = false;
-          const nested = union(child.children.filter((c) => c.gpuStart != null).map((c) => [c.gpuStart, c.gpuEnd]));
+          const nested = union(nestedCalls.filter((c) => c.gpuStart != null).map((c) => [c.gpuStart, c.gpuEnd]));
           for (const [a, b] of subtract(child.gpuStart, child.gpuEnd, nested)) {
             segments.push([a, b, row]);
             row.span += b - a;

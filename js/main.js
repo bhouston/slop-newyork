@@ -1,10 +1,10 @@
 import * as THREE from 'three/webgpu';
-import { Fn, output, pass, mrt, builtinIndirectContext, defaultIndirectSpecular, defaultIndirectDiffuse, clearcoat, sample, packNormalToOctahedral, unpackOctahedralToNormal, vec2, vec3, vec4, velocity, rtt, screenUV, screenSize, uniform, getViewPosition, cubeTexture } from 'three/tsl';
+import { Fn, output, pass, mrt, builtinIndirectContext, defaultIndirectSpecular, defaultIndirectDiffuse, clearcoat, sample, packNormalToOctahedral, unpackOctahedralToNormal, vec2, vec3, vec4, velocity, viewZDelta, convertToTexture, rtt, screenUV, screenSize, uniform, getViewPosition, cubeTexture } from 'three/tsl';
 import { ssr } from 'three/addons/tsl/display/SSRNode.js';
 import { depthAwareDownsample } from 'three/addons/tsl/display/DepthAwareDownsampleNode.js';
 import { jointBilateralUpsample } from 'three/addons/tsl/display/JointBilateralUpsample.js';
 import { temporalReproject } from 'three/addons/tsl/display/TemporalReprojectNode.js';
-import { reprojectedBeauty, previousViewZ } from 'three/addons/tsl/display/ReprojectedBeautyNode.js';
+import { reprojectedBeauty } from 'three/addons/tsl/display/ReprojectedBeautyNode.js';
 import { opaqueFragment, opaqueFragmentSource } from 'three/addons/tsl/utils/OpaqueFragment.js';
 import { outermostNormalView, outermostRoughness, outermostMetalness } from 'three/addons/tsl/utils/OutermostLobe.js';
 import { coverageCascade } from 'three/addons/tsl/lighting/CoverageCascade.js';
@@ -266,7 +266,7 @@ async function initApp() {
   const preMRT = mrt({
     output: opaqueFragment(packNormalToOctahedral(outermostNormalView)),
     metalrough: vec2(outermostMetalness, outermostRoughness),
-    velocity: vec4(velocity, 0, previousViewZ)
+    velocity: vec4(velocity, 0, viewZDelta)
   });
   // The attachments hold data, so the blending of transparent materials does not apply
   preMRT.setBlendMode('output', new THREE.BlendMode(THREE.NoBlending));
@@ -286,10 +286,18 @@ async function initApp() {
   // The beauty pass shades on top of the pre-pass's depth instead of clearing it, so the depth test rejects every
   // hidden fragment before it is shaded (no overdraw). TRAA jitters the camera for both passes alike.
   const beautyPass = pass(scene, camera, { depthTexture: prePass.renderTarget.depthTexture, autoClearDepth: false });
+  // The pre-pass keeps the depth of its previous frame for the reprojection below, so it draws to one of two depth
+  // textures in turn: the beauty pass takes the one of this frame (the pre-pass is updated first, see afterPrePass)
+  const updateBeautyPass = beautyPass.updateBefore.bind(beautyPass);
+  beautyPass.updateBefore = (frame) => {
+    beautyPass.renderTarget.depthTexture = prePass.renderTarget.depthTexture;
+    return updateBeautyPass(frame);
+  };
 
-  // SSR reflects the previous frame's beauty, reprojected, so it is ready before this frame is shaded. The mip chain
-  // serves the cone footprint of rough reflections.
-  const previousBeauty = reprojectedBeauty(prePass, beautyPass);
+  // SSR reflects the previous frame's beauty, reprojected, so it is ready before this frame is shaded. It is
+  // reprojected once into a texture, which SSR and SSGI both read. The mip chain serves the cone footprint of rough
+  // reflections.
+  const previousBeauty = convertToTexture(reprojectedBeauty(prePass, beautyPass));
   previousBeauty.renderTarget.texture.generateMipmaps = true;
   previousBeauty.renderTarget.texture.minFilter = THREE.LinearMipmapLinearFilter;
 
@@ -484,11 +492,11 @@ async function initApp() {
   // only the selected graph renders, and its history is reset whenever the selection changes.
   // 'none' is the beauty pass as it is, without TRAA (and so without its camera jitter), for comparison: FSR1 then
   // upscales the aliased edges, and the noise SSR and SSGI leave is no longer averaged out.
+  // TRAA reads the depth the pre-pass keeps of its previous frame, in place of a copy of its own
+  const prePassPreviousDepth = prePass.getPreviousTextureNode('depth');
   const variants = Object.fromEntries(['catmull-rom', 'linear', 'none'].map((filter) => {
-    const antialiased = filter === 'none' ? null : traa(beautyPass, prePassDepth, prePassVelocity, camera);
+    const antialiased = filter === 'none' ? null : traa(beautyPass, prePassDepth, prePassVelocity, camera, prePassPreviousDepth);
     if (antialiased) antialiased.historySampling = filter;
-    // the velocity's alpha holds previousViewZ: the disocclusion test follows the vehicles as they move
-    if (antialiased) antialiased.usePreviousViewZ = true;
     const source = antialiased ? antialiased.getTextureNode() : beautyPass.getTextureNode('output');
     const upscaled = fsr1(source).getTextureNode();
     // TRAA builds the pre-pass before the beauty pass, which shades on top of its depth. Without TRAA nothing in the
