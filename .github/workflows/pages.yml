@@ -4,7 +4,7 @@ name: Publish to GitHub Pages
 
 on:
   push:
-    branches: [ssr-brdf]
+    branches: [dev]
   workflow_dispatch:
 
 permissions:
